@@ -4,7 +4,7 @@ Familiekalender for nettbrettet på kjøkkenet og mobilene til familien Nervik P
 
 - **Appen:** `site/` (HTML/JS, publiseres av Netlify på https://familiekalender-np.netlify.app)
 - **Database og innlogging:** Supabase-prosjektet `wvpvaczktzbtdbfetepi` (Stockholm). Skjemaet ligger i `supabase/migrations/`.
-- **Avtaler:** Google Kalender «Family» (kommer).
+- **Avtaler:** Google Kalender «Family», lest og skrevet av Netlify-funksjonen `netlify/functions/kalender.mjs` (`/api/kalender`).
 - **Kollektivtider:** Entur (AtB og tog).
 
 ## Publisering
@@ -25,5 +25,12 @@ Ingen passord. Hver enhet logger inn anonymt i Supabase og kobles til familien m
 
 ## Status
 
-Fase 1: ekte data fra Supabase med sanntid mellom enhetene, paring med kode, vær fra MET og avganger fra Entur.
-Avtalene er fortsatt eksempler til Google Kalender «Family» er koblet til (neste steg).
+Fase 1: ekte data fra Supabase med sanntid mellom enhetene, paring med kode, vær fra MET, avganger fra Entur
+og avtaler fra Google Kalender «Family».
+
+## Google Kalender
+
+- Tjenestekonto i Google Cloud-prosjektet `fit-discipline-512907-t9`; «Family» er delt med den («Gjøre endringer i aktiviteter»).
+- Nøkkelen ligger **bare** i Netlify som miljøvariabelen `GOOGLE_SERVICE_ACCOUNT` (hemmelig, Functions). Aldri i repoet.
+- Kalender-ID ligger i Supabase: `household_settings.gcal_calendar_id`.
+- Funksjonen svarer bare enheter som er paret med familien (Supabase-økten sjekkes mot `household_users`).
