@@ -98,6 +98,13 @@ export function renTekst(s){
     .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
     .replace(/\n{3,}/g, '\n\n').trim();
 }
+// Hvor avtalen kommer fra, f.eks. «spond» når Spond har lagt den inn. Brukes til å plassere avtaler uten kode.
+export function kildeAv(e){
+  const spor = [e.iCalUID, e.creator && e.creator.email, e.organizer && e.organizer.email, e.source && e.source.url,
+    e.description, e.extendedProperties && JSON.stringify(e.extendedProperties)].filter(Boolean).join(' ').toLowerCase();
+  if (spor.includes('spond')) return 'spond';
+  return '';
+}
 export function tilAvtale(e){
   return {
     id: e.id,
@@ -107,7 +114,8 @@ export function tilAvtale(e){
     slutt: e.end ? (e.end.dateTime || e.end.date) : null,
     sted: e.location || '',
     beskrivelse: renTekst(e.description || ''),
-    gjentas: !!e.recurringEventId
+    gjentas: !!e.recurringEventId,
+    kilde: kildeAv(e)
   };
 }
 // «Sjåfør: …»-linja byttes eller legges til; resten av beskrivelsen står urørt.

@@ -473,3 +473,4 @@ svg{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-lin
 #footNote.bad{color:var(--bad);font-weight:600}
 .time.allday .t-start{font-size:15px}
 .time.allday .t-end{white-space:nowrap}
+.field > small.hint{display:block;margin-top:4px;font-size:12.5px}

@@ -84,7 +84,7 @@
   }
   // Lagring venter litt (tekstfelt). Så lenge noe venter på å bli lagret, hentes ikke samme tabell på nytt,
   // ellers kunne en oppdatering fra en annen enhet (eller ekkoet av egen lagring) overskrive det som nettopp ble skrevet.
-  var DIRTY_FOR = {members:['members','notif'], chore_rules:['rules'], prep_rules:['preps'], household_settings:['preps','notif']};
+  var DIRTY_FOR = {members:['members','notif'], chore_rules:['rules'], prep_rules:['preps'], household_settings:['preps','notif','hide']};
   function later(name, fn, ms){
     clearTimeout(DB.timers[name]);
     var gen = DB.gen[name] = (DB.gen[name] || 0) + 1;
@@ -106,7 +106,7 @@
   function bySort(a,b){ return (a.sort_order||0) - (b.sort_order||0); }
   function applyMembers(rows){
     rows = rows.slice().sort(bySort);
-    members = rows.map(function(r){ return {id:r.id, name:r.name, color:r.color, kid:r.is_kid, code:r.gcal_code, alias:r.gcal_alias}; });
+    members = rows.map(function(r){ return {id:r.id, name:r.name, color:r.color, kid:r.is_kid, code:r.gcal_code, alias:r.gcal_alias, words:r.title_words || ''}; });
     DB.known.members = {};
     notif.people = {};
     rows.forEach(function(r){
@@ -134,6 +134,7 @@
     ['prep','chores','dinner','ride','morning','escalate'].forEach(function(k){ if (typeof n[k] === 'boolean') notif[k] = n[k]; });
     if (NOTIF_LEADS.indexOf(n.dinnerLead) > -1) notif.dinnerLead = n.dinnerLead;
     if (validTime(t5(s.default_dinner_time))) DEFAULT_TIME = t5(s.default_dinner_time);
+    hideWords = s.hide_words || '';
     if (Array.isArray(s.transit) && s.transit.length) TRANSIT.routes = s.transit.map(function(r){ return Object.assign({lines:[]}, r); });
   }
   function applyDinners(rows){ dinnerEdits = {}; rows.forEach(function(r){ dinnerEdits[r.day] = {dish:r.dish, time:t5(r.at_time)}; }); }
@@ -178,7 +179,7 @@
   function saveMembersNow(){
     if (!canAdmin()) return;
     var rows = members.map(function(m, i){
-      return {id:m.id, household_id:DB.household, name:m.name, color:m.color, is_kid:!!m.kid, gcal_code:normCode(m.code), gcal_alias:m.alias || '', sort_order:i};
+      return {id:m.id, household_id:DB.household, name:m.name, color:m.color, is_kid:!!m.kid, gcal_code:normCode(m.code), gcal_alias:m.alias || '', title_words:m.words || '', sort_order:i};
     });
     var gone = Object.keys(DB.known.members).filter(function(id){ return !P[id]; });
     DB.known.members = {}; members.forEach(function(m){ DB.known.members[m.id] = true; });
@@ -279,7 +280,15 @@
   function writeCode(id){ var m = P[id]; return m ? (normCode(m.code) || defaultCode(m.name) || '?') : '?'; }
   var PREFIX_RE = /^\s*([A-Za-zÆØÅæøå0-9]{1,4}(?:\s*[+\/&,]\s*[A-Za-zÆØÅæøå0-9]{1,4})*)\s*[-–—:]\s*(\S.*)$/;
   var SPACE_PREFIX_RE = /^\s*([A-Za-zÆØÅæøå0-9]{1,4}(?:\s*[+\/&]\s*[A-Za-zÆØÅæøå0-9]{1,4})*)\s+(\S.*)$/;
-  function parseTitle(t){
+  // «Ord i tittelen» (per person) og «Skjul avtaler som inneholder» (for familien): kommaseparerte ord, store/små
+  // bokstaver og % spiller ingen rolle. «Spond» treffer også alt Spond har lagt inn.
+  var hideWords = '';
+  function wordList(s){ return String(s || '').split(/[,;\n]+/).map(function(w){ return w.replace(/[%*]/g, '').trim().toLowerCase(); }).filter(Boolean); }
+  function wordHit(words, title, kilde){
+    var low = String(title || '').toLowerCase();
+    return wordList(words).some(function(w){ return low.indexOf(w) > -1 || (w === 'spond' && kilde === 'spond'); });
+  }
+  function parseTitle(t, kilde){
     t = String(t || '');
     var map = codeMap(), m = PREFIX_RE.exec(t);
     if (m){
@@ -305,6 +314,8 @@
       return n && new RegExp('(^|[^\\p{L}])'+escRe(n)+'(?=$|[^\\p{L}])', 'iu').test(t);
     }).map(function(mm){ return mm.id; });
     if (byName.length) return {whos:byName, title:t.trim(), byName:true};
+    var byWords = members.filter(function(mm){ return mm.words && wordHit(mm.words, t, kilde); }).map(function(mm){ return mm.id; });
+    if (byWords.length) return {whos:byWords, title:t.trim(), byWords:true};
     return {whos:['all'], title:t.trim()};
   }
   function memberFromText(v){
@@ -446,7 +457,7 @@
   function spreadEvents(list){
     var byDay = {};
     list.forEach(function(a){
-      var base = {id:a.id, title:a.tittel, place:a.sted || '', desc:a.beskrivelse || '', recurring:!!a.gjentas};
+      var base = {id:a.id, title:a.tittel, place:a.sted || '', desc:a.beskrivelse || '', recurring:!!a.gjentas, kilde:a.kilde || ''};
       if (a.heleDagen){
         var d = fromIso(a.start.slice(0,10)), end = fromIso((a.slutt || a.start).slice(0,10));   // sluttdato er dagen etter
         if (end <= d) end = addDays(d, 1);
@@ -546,7 +557,9 @@
   }
   function eventsRaw(d){
     var key = iso(d);
-    var base = GCAL.mode === 'live' ? (GCAL.byDay[key] || []) : WEEK[wd(d)].concat(state.demoExtras[key] || []);
+    var base = GCAL.mode === 'live'
+      ? (GCAL.byDay[key] || []).filter(function(e){ return !hideWords || !wordHit(hideWords, e.title, null); })
+      : WEEK[wd(d)].concat(state.demoExtras[key] || []);
     return base.concat(state.extras[key] || []);
   }
   function timeTxt(e){ return e.allDay ? 'Hele dagen' : e.start+(e.end ? '–'+e.end : ''); }
@@ -756,7 +769,7 @@
     var list = eventsRaw(d);
     return list.map(function(e){
       var k = key+'|'+e.id;
-      var pt = parseTitle(e.title);
+      var pt = parseTitle(e.title, e.kilde);
       var pd = parseDesc(e.desc);
       var driverId = pd.driverId, driverName = pd.driverName;
       if (state.drivers[k] !== undefined){
@@ -1137,6 +1150,9 @@
     return '<div class="gcal-info"><h3 class="label">Google Kalender</h3>'+
       '<p>'+(GCAL.mode === 'live' ? 'Avtalene hentes fra Google Kalender «'+esc(GCAL.name || 'Family')+'» hvert 2. minutt. Valg av sjåfør skrives tilbake til avtalen.' :
         'Google Kalender «Family» er ikke koblet til ennå. Til da vises eksempelavtaler.')+'</p>'+
+      (GCAL.mode === 'live' || gcalConfigured() ? '<div class="field"><label class="label" for="hidewords">Skjul avtaler som inneholder</label>'+
+        '<input class="tinput hidewordsin" id="hidewords" value="'+esc(hideWords)+'" maxlength="300" autocomplete="off" spellcheck="false" placeholder="F.eks. Ansvarlig middag, Bytte sengetøy">'+
+        '<small class="hint">For ting appen allerede viser som faste oppgaver. Avtalene blir liggende i Google.</small></div>' : '')+
       '<p>Start tittelen med koden til personen, for eksempel <b>«'+esc(writeCode(kid.id))+' - Håndball»</b>'+
       (kid2 ? '. Flere personer: <b>«'+esc(writeCode(kid.id))+'+'+esc(writeCode(kid2.id))+' - Tannlege»</b>' : '')+
       '. Store eller små bokstaver spiller ingen rolle. Uten kode havner avtalen hos hele familien, med mindre et navn står i tittelen.</p>'+
@@ -1167,6 +1183,9 @@
           '<input class="tinput maliasin" id="alias-'+m.id+'" data-id="'+m.id+'" value="'+esc(m.alias)+'" maxlength="20" autocapitalize="characters" autocomplete="off" spellcheck="false" placeholder="F.eks. eldre koder"></div>'+
       '</div>'+
       codeHintHTML(m)+
+      '<div class="field"><label class="label" for="words-'+m.id+'">Ord i tittelen</label>'+
+        '<input class="tinput mwordsin" id="words-'+m.id+'" data-id="'+m.id+'" value="'+esc(m.words || '')+'" maxlength="200" autocomplete="off" spellcheck="false" placeholder="F.eks. Heimdal, håndball, Spond">'+
+        '<small class="hint">Avtaler uten kode og navn som inneholder ett av ordene, havner hos '+esc(nameOf(m.id) || 'denne personen')+'. «Spond» tar alt som kommer fra Spond.</small></div>'+
       '<div class="mfoot">'+
         '<label class="toggle" for="kid-'+m.id+'"><input type="checkbox" id="kid-'+m.id+'" data-act="kid" data-id="'+m.id+'"'+(m.kid?' checked':'')+'>Barn <small>kjører ikke</small></label>'+
         (members.length > 1 ? '<button type="button" class="linkbtn danger'+(confirming?' confirm':'')+'" data-act="remove" data-id="'+m.id+'">'+(confirming ? 'Trykk igjen for å fjerne' : 'Fjern')+'</button>' : '')+
@@ -2141,6 +2160,16 @@
       } else mc.alias = t.value;
       saveMembers();
       updateCodeHints();
+      render();
+    } else if (t.classList.contains('mwordsin')){
+      var mw = P[t.dataset.id];
+      if (!mw) return;
+      mw.words = t.value;
+      saveMembers();
+      render();
+    } else if (t.classList.contains('hidewordsin')){
+      hideWords = t.value;
+      later('hide', function(){ return saveSettingsNow({hide_words:hideWords}); }, 600);
       render();
     } else if (t.classList.contains('ptitle') || t.classList.contains('pwords')){
       var pr = prepById(t.dataset.pid);
