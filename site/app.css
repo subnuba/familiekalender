@@ -497,3 +497,6 @@ svg{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-lin
 .ridepick{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border-radius:12px;background:var(--surface-2);border:1px solid var(--line);width:100%}
 .carpool{display:flex;gap:6px}
 .carpool .tinput{flex:1;min-width:0}
+.pushcard{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--surface-2);font-size:14px}
+.pushcard p{margin:0}
+.pushcard .btn{align-self:flex-start}

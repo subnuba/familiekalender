@@ -1,0 +1,11 @@
+{
+  "name": "familiekalender",
+  "private": true,
+  "description": "Familiekalender for Nervik Petersen. Appen ligger i site/, funksjonene i netlify/functions/.",
+  "scripts": {
+    "bygg": "node netlify/bygg.mjs"
+  },
+  "dependencies": {
+    "web-push": "3.6.7"
+  }
+}

@@ -131,7 +131,7 @@
     DB.settings = s;
     preps.fallback = s.prep_fallback !== false;
     var n = s.notif || {};
-    ['prep','chores','dinner','ride','morning','escalate'].forEach(function(k){ if (typeof n[k] === 'boolean') notif[k] = n[k]; });
+    ['prep','chores','dinner','ride','drive','morning','escalate'].forEach(function(k){ if (typeof n[k] === 'boolean') notif[k] = n[k]; });
     if (NOTIF_LEADS.indexOf(n.dinnerLead) > -1) notif.dinnerLead = n.dinnerLead;
     if (validTime(t5(s.default_dinner_time))) DEFAULT_TIME = t5(s.default_dinner_time);
     hideWords = s.hide_words || '';
@@ -153,7 +153,8 @@
     completions: function(){ return q(sb.from('completions').select('task_key').eq('household_id', DB.household).gte('done_at', addDays(today(), -60).toISOString())).then(applyCompletions); },
     swaps: function(){ return q(sb.from('swaps').select('*').eq('household_id', DB.household)).then(applySwaps); },
     event_owners: function(){ return q(sb.from('event_owners').select('scope, match, who').eq('household_id', DB.household)).then(applyOwners); },
-    rides: function(){ return q(sb.from('rides').select('event_id, value').eq('household_id', DB.household)).then(applyRides); }
+    rides: function(){ return q(sb.from('rides').select('event_id, value').eq('household_id', DB.household)).then(applyRides); },
+    push_subscriptions: function(){ return q(sb.from('push_subscriptions').select('member_id, phone').eq('household_id', DB.household)).then(applyPushSubs); }
   };
   function loadAll(){
     // Medlemmer først: de andre tabellene viser til dem. Tabeller med endringer som ikke er lagret ennå, hoppes over.
@@ -228,7 +229,7 @@
       return Promise.all(members.map(function(m){
         var pn = personNotif(m.id);
         return dbDone(sb.from('members').update({notif_on:pn.on, notif_time:pn.time, phone:pn.phone, start_view:pn.start}).eq('id', m.id), 'varslene');
-      }).concat([saveSettingsNow({notif:{prep:notif.prep, chores:notif.chores, dinner:notif.dinner, dinnerLead:notif.dinnerLead, ride:notif.ride, morning:notif.morning, escalate:notif.escalate}})]));
+      }).concat([saveSettingsNow({notif:{prep:notif.prep, chores:notif.chores, dinner:notif.dinner, dinnerLead:notif.dinnerLead, ride:notif.ride, drive:notif.drive, morning:notif.morning, escalate:notif.escalate}})]));
     } else if (DB.myMember){
       var pn = personNotif(DB.myMember);
       return dbDone(sb.rpc('update_my_prefs', {p_start_view:pn.start, p_notif_on:pn.on, p_notif_time:pn.time, p_phone:pn.phone}), 'valgene dine');
@@ -722,7 +723,7 @@
   var NOTIF_TIMES = ['18:00','19:00','20:00','21:00'];
   var NOTIF_LEADS = [30, 60, 90];
   function defaultNotif(){
-    return {people:{}, prep:true, chores:true, dinner:true, dinnerLead:60, ride:true, morning:false, escalate:false};
+    return {people:{}, prep:true, chores:true, dinner:true, dinnerLead:60, ride:true, drive:true, morning:false, escalate:false};
   }
   var notif = defaultNotif();   // fylles fra databasen (personvalg ligger på hvert familiemedlem)
   function saveNotif(){ later('notif', saveNotifNow, 400); }
@@ -769,6 +770,11 @@
           out.push({who:a, time:hm(e.startMin - 120), kind:'ride', title:'Ingen kjører ennå', body:evWho(e)+': '+e.title+' i dag kl. '+e.start, rideKey:e.key, done:false});
         });
       }
+      if (notif.drive) evts.filter(function(e){ return e.driver === a && !e.allDay && e.startMin >= 45; }).forEach(function(e){
+        var kids = e.whos.filter(function(x){ return x !== a && P[x]; });
+        out.push({who:a, time:hm(e.startMin - 45), kind:'drive', title:'Du kjører kl. '+e.start,
+          body:(kids.length ? names(kids)+' til ' : '')+e.title+(e.place ? ' · '+e.place : ''), rideKey:e.key, done:false});
+      });
       if (notif.escalate) dayPreps.filter(function(t){ return t.who !== 'all' && P[t.who] && P[t.who].kid; }).forEach(function(t){
         out.push({who:a, time:hm(toMin(personNotif(t.who).time) + 60), kind:'escalate', title:nameOf(t.who)+' har ikke krysset av', body:prepTitle(t)+' '+prepSub(t), key:t.key, done:t.done});
       });
@@ -1458,13 +1464,15 @@
     var leads = notif.dinner ? '<div class="chips" style="padding-left:28px">'+NOTIF_LEADS.map(function(l){
       return '<button type="button" class="chip" data-act="n-lead" data-l="'+l+'" aria-pressed="'+(notif.dinnerLead === l)+'">'+(l === 90 ? '1 t 30 min' : l === 60 ? '1 time' : l+' min')+' før</button>';
     }).join('')+'</div>' : '';
-    if (own) return '<h3 class="label">Dine valg</h3><p class="hint">Gjelder mobilen din. Nettbrettet viser alltid familien.</p>'+people+setupHTML();
-    return '<h3 class="label">Mobilene</h3><p class="hint">Nettbrettet viser alltid familien. På mobilen åpner appen der hver person har valgt, og varselet åpner samme sted.</p>'+people+
+    var pushTop = '<h3 class="label">Varsler på denne mobilen</h3>'+pushCardHTML();
+    if (own) return pushTop+'<h3 class="label">Dine valg</h3><p class="hint">Gjelder mobilen din. Nettbrettet viser alltid familien.</p>'+people+setupHTML();
+    return pushTop+'<h3 class="label">Mobilene</h3><p class="hint">Nettbrettet viser alltid familien. På mobilen åpner appen der hver person har valgt, og varselet åpner samme sted.</p>'+people+
       '<h3 class="label">Hva det varsles om</h3><div class="ntoggles">'+
         ntoggle('n-prep', notif.prep, 'Forberedelser som ikke er gjort', 'om kvelden, med «Gjort»-knapp')+
         ntoggle('n-chores', notif.chores, 'Faste oppgaver som ikke er gjort', 'om kvelden')+
         ntoggle('n-dinner', notif.dinner, 'Middagsansvar', 'før middag')+leads+
         ntoggle('n-ride', notif.ride, 'Skyss som mangler', 'til de voksne, kvelden før og to timer før')+
+        ntoggle('n-drive', notif.drive, 'Til den som kjører', '45 minutter før')+
         ntoggle('n-morning', notif.morning, 'Morgenoversikt kl. 07:00', 'dagens avtaler')+
         ntoggle('n-escalate', notif.escalate, 'Si fra til de voksne', 'en time etter barnets påminnelse, hvis forberedelsen ikke er gjort')+
       '</div>'+
@@ -1533,7 +1541,7 @@
         : 'Vil du bruke en annen telefon, får du en ny kode fra nettbrettet eller en voksen.';
     } else if (tab === 'notif'){
       $('settingsBody').innerHTML = notifSettingsHTML();
-      $('settingsNote').textContent = 'Varslene sendes ikke til mobilene ennå; det kommer når mobilene kobles til. Her ser du hva som vil bli sendt, og «Vis» viser hvordan det ser ut.';
+      $('settingsNote').textContent = 'Varsler sendes til mobilene som har slått dem på, når tiden kommer. Det som er krysset av, sendes ikke. «Vis» viser hvordan et varsel ser ut.';
     } else if (tab === 'prep'){
       $('settingsBody').innerHTML =
         '<p class="hint">Oppgaver som dukker opp av seg selv når en avtale nærmer seg, i kolonnen til den avtalen gjelder. Passer flere regler, gjelder den med det lengste ordet.</p>'+
@@ -2140,8 +2148,12 @@
     else if (act === 'stab'){
       state.stab = b.dataset.tab; state.confirm = null; state.editRule = null; state.editPrep = null;
       if (state.stab === 'devices') loadDevices();
+      if (state.stab === 'notif') pushRefresh();
       renderSettings(); refocus(sel);
     }
+    else if (act === 'push-on'){ enablePush(); }
+    else if (act === 'push-off'){ disablePush(); }
+    else if (act === 'push-test'){ testPush(); }
     else if (act === 'd-code'){ state.confirm = null; makeCode(b.dataset.who); refocus(sel); }
     else if (act === 'd-unpair'){
       if (state.confirm === 'unpair') unpairThis();
@@ -2352,7 +2364,7 @@
       preps.fallback = t.checked; prepsChanged();
     } else if (t.dataset.act === 'n-on' && P[t.dataset.id]){
       personNotif(t.dataset.id).on = t.checked; notifChanged();
-    } else if (['n-prep','n-chores','n-dinner','n-ride','n-morning','n-escalate'].indexOf(t.dataset.act) > -1){
+    } else if (['n-prep','n-chores','n-dinner','n-ride','n-drive','n-morning','n-escalate'].indexOf(t.dataset.act) > -1){
       notif[t.dataset.act.slice(2)] = t.checked; notifChanged();
     } else return;
     var again = document.getElementById(keep); if (again) again.focus();
@@ -2521,6 +2533,99 @@
     });
   }
 
+  /* ---------- Push-varsler på denne mobilen ---------- */
+  // Slås på fra hver persons egen mobil. Serveren (Netlify) sender varslene; appen lagrer bare abonnementet.
+  var PUSH = {supported:false, permission:'default', sub:null, busy:false, msg:'', key:null, members:{}};
+  function pushSupported(){ return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window; }
+  function personalDevice(){ return DB.role !== 'tablet' && !!DB.myMember; }
+  function urlB64(b){
+    var pad = '='.repeat((4 - b.length % 4) % 4), raw = atob((b + pad).replace(/-/g, '+').replace(/_/g, '/')), out = new Uint8Array(raw.length);
+    for (var i=0;i<raw.length;i++) out[i] = raw.charCodeAt(i);
+    return out;
+  }
+  function swReg(){ return navigator.serviceWorker.register('/sw.js').then(function(){ return navigator.serviceWorker.ready; }); }
+  function pushKey(){
+    if (PUSH.key) return Promise.resolve(PUSH.key);
+    return fetch('/api/varsler?nokkel=1').then(function(r){ return r.json(); }).then(function(b){
+      if (!b.publicKey) throw new Error(b.melding || 'Serveren mangler nøkkel for varsler.');
+      PUSH.key = b.publicKey; return PUSH.key;
+    });
+  }
+  function applyPushSubs(rows){ PUSH.members = {}; rows.forEach(function(r){ (PUSH.members[r.member_id] = PUSH.members[r.member_id] || []).push(r.phone); }); }
+  function savePushSub(sub){
+    var j = sub.toJSON();
+    return sb.rpc('save_push_subscription', {p_endpoint:j.endpoint, p_p256dh:j.keys.p256dh, p_auth:j.keys.auth, p_phone: isIOS() ? 'iphone' : 'android'})
+      .then(function(res){ if (res.error) throw res.error; });
+  }
+  function pushRefresh(){
+    PUSH.supported = pushSupported();
+    if (!PUSH.supported || !personalDevice()) return Promise.resolve();
+    PUSH.permission = Notification.permission;
+    return swReg().then(function(reg){ return reg.pushManager.getSubscription(); }).then(function(sub){
+      PUSH.sub = sub;
+      if (sub && PUSH.permission === 'granted') return savePushSub(sub);   // knytt til riktig person hvis enheten er paret på nytt
+    }).catch(function(e){ console.warn('[familiekalender] varsler', e); }).then(function(){
+      if (!$('settings').hidden && state.stab === 'notif') renderSettings();
+    });
+  }
+  function enablePush(){
+    if (!PUSH.supported || PUSH.busy) return;
+    PUSH.busy = true; PUSH.msg = '';
+    var asked;
+    try { asked = Notification.requestPermission(); } catch(e){ asked = null; }   // må skje rett etter trykket (iPhone)
+    renderSettings();
+    Promise.resolve(asked).then(function(p){
+      p = p || Notification.permission;
+      PUSH.permission = p;
+      if (p !== 'granted') throw new Error(p === 'denied' ? 'Varsler ble ikke tillatt. Det må endres i innstillingene for appen.' : 'Varsler ble ikke slått på.');
+      return Promise.all([swReg(), pushKey()]);
+    }).then(function(r){
+      var reg = r[0], key = r[1];
+      return reg.pushManager.getSubscription().then(function(old){
+        return old || reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:urlB64(key)});
+      });
+    }).then(function(sub){ PUSH.sub = sub; return savePushSub(sub); })
+      .then(function(){ PUSH.msg = 'Varsler er slått på. Trykk «Send prøvevarsel» for å sjekke.'; })
+      .catch(function(e){ PUSH.msg = errText(e); })
+      .then(function(){ PUSH.busy = false; renderSettings(); });
+  }
+  function disablePush(){
+    var sub = PUSH.sub; if (!sub) return;
+    PUSH.busy = true; renderSettings();
+    var ep = sub.endpoint;
+    Promise.resolve(sub.unsubscribe()).catch(function(){}).then(function(){
+      return sb.rpc('remove_push_subscription', {p_endpoint:ep});
+    }).then(function(){ PUSH.sub = null; PUSH.msg = 'Varsler er slått av på denne mobilen.'; })
+      .catch(function(e){ PUSH.msg = errText(e); })
+      .then(function(){ PUSH.busy = false; renderSettings(); });
+  }
+  function testPush(){
+    PUSH.busy = true; PUSH.msg = ''; renderSettings();
+    apiCall('POST', '/api/varsler', {handling:'test'}).then(function(b){
+      PUSH.msg = b.sendt ? 'Prøvevarsel sendt. Det kommer om noen sekunder.' : 'Fant ingen mobil å sende til. Slå av og på varsler igjen.';
+    }).catch(function(e){ PUSH.msg = 'Kunne ikke sende: '+(e.message || e); })
+      .then(function(){ PUSH.busy = false; renderSettings(); });
+  }
+  function pushCardHTML(){
+    if (!personalDevice()) return '<p class="hint">Varsler slås på fra hver persons egen mobil, under Innstillinger → Varsler.</p>';
+    var body;
+    if (!PUSH.supported){
+      body = isIOS() && !isStandalone()
+        ? '<p>Åpne Familiekalender fra ikonet på Hjem-skjermen for å slå på varsler. I Safari går det ikke.</p>'
+        : '<p>Denne nettleseren kan ikke vise varsler. Bruk Chrome på Android, eller appen fra Hjem-skjermen på iPhone.</p>';
+    } else if (PUSH.permission === 'denied'){
+      body = '<p>Varsler er blokkert for appen. Slå dem på i innstillingene for '+(isIOS() ? 'appen (Innstillinger → Varslinger)' : 'nettstedet i Chrome')+'.</p>';
+    } else if (PUSH.sub && PUSH.permission === 'granted'){
+      body = '<p><b>Varsler er på</b> på denne mobilen.</p><div class="own-acts">'+
+        '<button type="button" class="btn sm primary" data-act="push-test"'+(PUSH.busy ? ' disabled' : '')+'>Send prøvevarsel</button>'+
+        '<button type="button" class="linkbtn" data-act="push-off"'+(PUSH.busy ? ' disabled' : '')+'>Slå av</button></div>';
+    } else {
+      body = '<p>Få påminnelser om oppgaver, middag og skyss på denne mobilen. Påminnelser om avtaler kommer fra Google Kalender som før.</p>'+
+        '<button type="button" class="btn primary" data-act="push-on"'+(PUSH.busy ? ' disabled' : '')+'>'+ICON_BELL+(PUSH.busy ? 'Slår på …' : 'Slå på varsler')+'</button>';
+    }
+    return '<div class="pushcard">'+body+(PUSH.msg ? '<p class="hint" role="status">'+esc(PUSH.msg)+'</p>' : '')+'</div>';
+  }
+
   /* ---------- Enheter: paring med kode ---------- */
   // Hver enhet logger inn anonymt og kobles til familien med en kode som en voksen eller nettbrettet lager.
   // Koden virker i 30 minutter og bare én gang.
@@ -2548,7 +2653,8 @@
   }
   function phoneStatus(id){
     var n = (DB.devices || []).filter(function(d){ return d.member_id === id; }).length;
-    return n ? (n === 1 ? 'koblet til' : n+' enheter koblet til') : 'ikke koblet til ennå';
+    var push = PUSH.members[id] && PUSH.members[id].length ? ' · varsler på' : '';
+    return (n ? (n === 1 ? 'koblet til' : n+' enheter koblet til') : 'ikke koblet til ennå')+push;
   }
   function loadDevices(){
     return q(sb.from('household_users').select('user_id, member_id, role, device_label, created_at').eq('household_id', DB.household).order('created_at'))
@@ -2730,6 +2836,7 @@
   function begin(){
     subscribe();
     loadDevices();
+    pushRefresh();
     if (DB.role !== 'tablet' && DB.myMember && P[DB.myMember] && personNotif(DB.myMember).start === 'me'){ state.view = 'me'; state.me = DB.myMember; }
     gateHide();
     render();
@@ -2764,6 +2871,24 @@
       console.warn('[familiekalender] oppdatering', e);
       syncStatus('Får ikke kontakt. Viser det som ble hentet sist.', true);
     });
+  }
+
+  // Netlify (planlagt utsending av varsler) kjører denne filen uten nettleser og bruker samme utregning
+  if (window.__FK_SERVER){
+    window.__FK_SERVER({
+      load: function(d){
+        DB.household = d.household; DB.role = 'tablet'; DB.myMember = null;
+        applyMembers(d.members || []); applyRules(d.chore_rules || []); applyPreps(d.prep_rules || []); applySettings(d.settings || null);
+        applyDinners(d.dinners || []); applyCompletions(d.completions || []); applySwaps(d.swaps || []);
+        applyOwners(d.event_owners || []); applyRides(d.rides || []);
+        GCAL.mode = 'live'; GCAL.byDay = spreadEvents(d.avtaler || []);   // aldri eksempelavtaler på serveren
+      },
+      notificationsFor: notificationsFor,
+      eventsFor: eventsFor,
+      nameOf: nameOf,
+      today: today, iso: iso, hhmm: hhmm
+    });
+    return;
   }
 
   seedDemoEvents();
