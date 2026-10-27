@@ -484,3 +484,16 @@ svg{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-lin
 .own-acts{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
 .btn.sm{min-height:36px;padding:0 14px;font-size:13.5px;white-space:normal;text-align:left;line-height:1.2}
 .chip.person[aria-pressed="false"]{border-color:var(--c)}
+
+/* Pakkeliste: forberedelser som handler om å pakke, kan krysses av rett i boksen */
+.ppreps{display:flex;flex-direction:column;gap:4px;margin-bottom:8px}
+.pprep{display:flex;align-items:flex-start;gap:8px;padding:4px 0;border:0;background:none;text-align:left;cursor:pointer;font:inherit;color:inherit}
+.pprep svg{width:20px;height:20px;flex:none;color:var(--c);margin-top:1px}
+.pprep b{font-weight:600}
+.pprep small{color:var(--muted);font-size:12.5px}
+.pprep.done b{text-decoration:line-through;color:var(--muted)}
+/* Skyss */
+.chip.ghost{background:transparent;border-style:dashed;color:var(--muted)}
+.ridepick{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border-radius:12px;background:var(--surface-2);border:1px solid var(--line);width:100%}
+.carpool{display:flex;gap:6px}
+.carpool .tinput{flex:1;min-width:0}

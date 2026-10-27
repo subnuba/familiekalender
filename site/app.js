@@ -140,6 +140,7 @@
   function applyDinners(rows){ dinnerEdits = {}; rows.forEach(function(r){ dinnerEdits[r.day] = {dish:r.dish, time:t5(r.at_time)}; }); }
   function applyCompletions(rows){ state.done = new Set(rows.map(function(r){ return r.task_key; })); }
   function applySwaps(rows){ state.swaps = {}; rows.forEach(function(r){ state.swaps[r.task_key] = r.member_id; }); }
+  function applyRides(rows){ RIDES = {}; rows.forEach(function(r){ RIDES[r.event_id] = r.value; }); }
   function applyOwners(rows){ OWNERS = {event:{}, title:{}}; rows.forEach(function(r){ if (OWNERS[r.scope]) OWNERS[r.scope][r.match] = r.who; }); }
 
   function q(p){ return p.then(function(res){ if (res.error) throw res.error; return res.data; }); }
@@ -151,7 +152,8 @@
     dinners: function(){ return q(sb.from('dinners').select('*').eq('household_id', DB.household).gte('day', iso(addDays(today(), -60)))).then(applyDinners); },
     completions: function(){ return q(sb.from('completions').select('task_key').eq('household_id', DB.household).gte('done_at', addDays(today(), -60).toISOString())).then(applyCompletions); },
     swaps: function(){ return q(sb.from('swaps').select('*').eq('household_id', DB.household)).then(applySwaps); },
-    event_owners: function(){ return q(sb.from('event_owners').select('scope, match, who').eq('household_id', DB.household)).then(applyOwners); }
+    event_owners: function(){ return q(sb.from('event_owners').select('scope, match, who').eq('household_id', DB.household)).then(applyOwners); },
+    rides: function(){ return q(sb.from('rides').select('event_id, value').eq('household_id', DB.household)).then(applyRides); }
   };
   function loadAll(){
     // Medlemmer først: de andre tabellene viser til dem. Tabeller med endringer som ikke er lagret ennå, hoppes over.
@@ -469,7 +471,6 @@
   // Til kalenderen er koblet til (gcal_calendar_id i innstillingene), vises ukemalen over som eksempler.
   var GCAL = {mode:'demo', byDay:{}, windows:{}, fetchedAt:null, failed:false, error:'', name:'', busy:null, tried:{}};
   var GCAL_REFRESH = 2*60000;
-  var pendingDrivers = {};
   function gcalConfigured(){ return !!(DB.settings && DB.settings.gcal_calendar_id); }
   function addEv(byDay, k, ev){ (byDay[k] = byDay[k] || []).push(ev); }
   // Fra Google-avtaler til appens format per dato. Heldags og avtaler over flere dager vises hver dag.
@@ -527,7 +528,6 @@
       Object.keys(GCAL.windows).forEach(function(f){ if (f !== w.from && f >= w.from && GCAL.windows[f] <= w.to) delete GCAL.windows[f]; });
       GCAL.windows[w.from] = w.to;
       GCAL.fetchedAt = new Date(); GCAL.failed = false; GCAL.error = ''; GCAL.name = b.kalender || '';
-      Object.keys(state.drivers).forEach(function(k){ if (!pendingDrivers[k]) delete state.drivers[k]; });   // nå lagret i Google
     }).catch(function(e){
       GCAL.failed = true; GCAL.error = e.message || String(e);
       console.warn('[familiekalender] kalender', e);
@@ -544,25 +544,26 @@
     if (GCAL.tried[w.from] && Date.now() - GCAL.tried[w.from] < 60000) return;
     fetchCalendar(d).then(function(){ render(); });
   }
-  // «Hvem kjører?»: skrives til beskrivelsen av avtalen i Google («Sjåfør: Magne»)
-  function setDriver(key, who){
-    state.drivers[key] = who;
-    if (GCAL.mode !== 'live') return;
+  // Skyss: «Magne», «Buss» eller «Sitter på med Kari». Lagres i Supabase (står selv om Spond oppdaterer avtalen)
+  // og skrives også som «Sjåfør: …» i beskrivelsen i Google, så det synes på mobilen.
+  var RIDES = {};
+  function setRide(key, value){
     var id = key.slice(key.indexOf('|') + 1);
-    pendingDrivers[key] = true;
-    syncStatus('Lagrer i Google Kalender …');
-    apiCall('POST', '/api/kalender', {handling:'sjåfør', id:id, sjåfør: who ? nameOf(who) : ''}).then(function(b){
+    value = String(value || '').trim().slice(0, 60);
+    if (value) RIDES[id] = value; else delete RIDES[id];
+    if (sb && DB.household){
+      dbDone(value ? sb.from('rides').upsert({household_id:DB.household, event_id:id, value:value, updated_at:new Date().toISOString()})
+                   : sb.from('rides').delete().eq('household_id', DB.household).eq('event_id', id), 'skyssen');
+    }
+    if (GCAL.mode !== 'live') return;
+    apiCall('POST', '/api/kalender', {handling:'sjåfør', id:id, sjåfør:value}).then(function(b){
       var a = b.avtale;
       if (a) Object.keys(GCAL.byDay).forEach(function(k){ GCAL.byDay[k].forEach(function(e){ if (e.id === a.id) e.desc = a.beskrivelse || ''; }); });
-      delete pendingDrivers[key]; delete state.drivers[key];
-      syncStatus('');
-      render();
-    }).catch(function(e){
-      delete pendingDrivers[key]; delete state.drivers[key];
-      syncStatus('Kunne ikke lagre sjåfør i Google Kalender. '+(e.message || ''), true);
-      render();
-    });
+    }).catch(function(e){ console.warn('[familiekalender] sjåfør i Google', e); });   // står uansett i appen
   }
+  function setDriver(key, who){ setRide(key, who ? nameOf(who) : ''); }
+  function isBus(v){ return /^buss\b/i.test(String(v || '').trim()); }
+  function rideLabel(e){ return e.driver ? nameOf(e.driver)+' kjører' : e.driverName; }
   function renderFootNote(){
     var el = $('footNote'); if (!el) return;
     var t;
@@ -617,6 +618,7 @@
   }
 
   var ICON_CAR = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 16v-5l2-5h10l2 5v5"/><path d="M3 16h18"/><circle cx="7.5" cy="18.5" r="1.5"/><circle cx="16.5" cy="18.5" r="1.5"/></svg>';
+  var ICON_BUS = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3.5" width="14" height="14" rx="2.5"/><path d="M5 11h14M8 21v-3.5M16 21v-3.5"/><circle cx="8.5" cy="14.5" r=".8"/><circle cx="15.5" cy="14.5" r=".8"/></svg>';
   var ICON_WARN = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l9.5 17h-19L12 3z"/><path d="M12 10v4M12 17h.01"/></svg>';
   var ICON_UP = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg>';
   var ICON_DOWN = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
@@ -795,7 +797,12 @@
         if (ow.length) pt = {whos:ow, title:pt.title, owned:ov.scope};
       }
       var pd = parseDesc(e.desc);
-      var driverId = pd.driverId, driverName = pd.driverName;
+      var driverId = pd.driverId, driverName = pd.driverName, needsRide = pd.needsRide;
+      if (RIDES[e.id] !== undefined){
+        needsRide = true;
+        driverId = memberFromText(RIDES[e.id]);
+        driverName = driverId ? nameOf(driverId) : RIDES[e.id];
+      }
       if (state.drivers[k] !== undefined){
         driverId = state.drivers[k] && P[state.drivers[k]] ? state.drivers[k] : null;
         driverName = driverId ? nameOf(driverId) : '';
@@ -806,7 +813,7 @@
         id:e.id, key:k, raw:e.title, title:pt.title, whos:pt.whos, who: pt.whos.length === 1 ? pt.whos[0] : 'many',
         unknown:pt.owned ? null : (pt.unknown || null), byName:!!pt.byName, owned:pt.owned || null, allDay:all, cont:!!e.cont, untilLater:!!e.untilLater, endsAt:e.endsAt || null,
         start:e.start, end:e.end, place:e.place, startMin:s, endMin: all || e.untilLater ? 1440 : e.end ? toMin(e.end) : s+60,
-        needsRide:pd.needsRide && !all, driver:driverId, driverName:driverName, bring:pd.bring, other:pd.other
+        needsRide:needsRide && !all, driver:driverId, driverName:driverName, bring:pd.bring, other:pd.other
       };
     }).sort(function(a,b){ return (b.allDay - a.allDay) || (a.startMin - b.startMin); });
   }
@@ -830,7 +837,7 @@
         var a = rides[i], b = rides[j];
         if (!(a.startMin < b.endMin + 15 && b.startMin < a.endMin + 15)) continue;
         if (!a.driverName && !b.driverName) out.push(evWho(a)+' ('+a.start+') og '+evWho(b)+' ('+b.start+') trenger skyss samtidig, og ingen kjører er satt.');
-        else if (a.driverName && a.driverName.toLowerCase() === (b.driverName || '').toLowerCase()) out.push(a.driverName+' er satt til å kjøre både '+evWho(a)+' ('+a.start+') og '+evWho(b)+' ('+b.start+').');
+        else if (a.driver && a.driver === b.driver) out.push(nameOf(a.driver)+' er satt til å kjøre både '+evWho(a)+' ('+a.start+') og '+evWho(b)+' ('+b.start+').');
       }
     }
     // Middagsansvar: lager mat fra 75 min før, spiser til 30 min etter middagstid
@@ -849,6 +856,25 @@
     var t = today();
     var thu = addDays(t, ((3 - wd(t) + 7) % 7) || 7);
     state.demoExtras[iso(thu)] = [{id:'x-klassetur', title:'OL - Klassetur til Ringve museum', start:'08:30', end:'14:30', place:'Skolen', desc:'Husk: matpakke, drikkeflaske, regntøy'}];
+  }
+
+  /* ---------- Skyss ---------- */
+  // Alle avtaler for barna (trening, kamp, teater …) kan få skyss, men må ikke. «Sjåfør: ?» i beskrivelsen = må avklares.
+  function rideOptional(e){ return !e.allDay && e.who !== 'all' && e.whos.some(function(id){ return P[id] && P[id].kid; }); }
+  function ridePickerHTML(e){
+    var cur = e.needsRide ? e.driverName : '';
+    var chips = drivers().map(function(x){
+      return '<button type="button" class="chip'+(e.driver === x ? ' sel' : '')+'" data-act="setdriver" data-key="'+esc(e.key)+'" data-who="'+x+'">'+esc(nameOf(x))+'</button>';
+    }).join('') +
+      '<button type="button" class="chip'+(isBus(cur) ? ' sel' : '')+'" data-act="setride" data-key="'+esc(e.key)+'" data-v="Buss">'+ICON_BUS+'Buss</button>' +
+      '<button type="button" class="chip'+(cur && !e.driver && !isBus(cur) ? ' sel' : '')+'" data-act="carpool" data-key="'+esc(e.key)+'">Sitter på med …</button>';
+    var carpool = state.carpool === e.key
+      ? '<form class="carpool" data-key="'+esc(e.key)+'"><input class="tinput carpoolin" id="cp-'+esc(e.key.replace(/[^a-z0-9]/gi,'-'))+'" maxlength="40" placeholder="Navn, f.eks. Kari" autocomplete="off" value="'+esc(state.carpoolText != null ? state.carpoolText : (cur && !e.driver && !isBus(cur) ? cur.replace(/^sitter på med\s*/i, '') : ''))+'" aria-label="Sitter på med hvem?">'+
+        '<button type="submit" class="btn sm primary">OK</button></form>'
+      : '';
+    return '<div class="ridepick"><span class="lbl-sm">Skyss til '+esc(e.title)+'</span><div class="chips">'+chips+'</div>'+carpool+
+      '<div class="own-acts">'+(cur ? '<button type="button" class="linkbtn" data-act="setride" data-key="'+esc(e.key)+'" data-v="">Fjern</button>' : '')+
+      '<button type="button" class="linkbtn" data-act="ride-cancel">Lukk</button></div></div>';
   }
 
   /* ---------- «Hvem gjelder dette?» ---------- */
@@ -888,17 +914,16 @@
       ? '<div class="time allday"><span class="t-start">Hele</span><span class="t-end">'+(e.endsAt ? 'til '+e.endsAt : 'dagen')+'</span></div>'
       : '<div class="time"><span class="t-start">'+e.start+'</span>'+(e.end ? '<span class="t-end">'+e.end+'</span>' : e.untilLater ? '<span class="t-end">→</span>' : '')+'</div>';
     var ride = '';
-    if (e.needsRide){
-      var dr = drivers();
-      if (state.picker === 'ride:'+e.key){
-        ride = '<span class="lbl-sm">Hvem kjører?</span>' + (dr.length ? dr.map(function(x){
-          return '<button type="button" class="chip'+(e.driver===x?' sel':'')+'" data-act="setdriver" data-key="'+e.key+'" data-who="'+x+'">'+esc(nameOf(x))+'</button>';
-        }).join('') : '<span class="lbl-sm">Ingen voksne er satt opp i innstillingene.</span>');
-      } else if (e.driverName){
-        ride = '<button type="button" class="chip" data-act="pickride" data-key="'+e.key+'" aria-label="'+esc(e.driverName)+' kjører. Trykk for å endre.">'+ICON_CAR+esc(e.driverName)+' kjører</button>';
-      } else {
-        ride = '<button type="button" class="chip warn" data-act="pickride" data-key="'+e.key+'">'+ICON_CAR+'Hvem kjører?</button>';
-      }
+    var optional = !e.needsRide && rideOptional(e);
+    if (state.picker === 'ride:'+e.key && (e.needsRide || optional)){
+      ride = ridePickerHTML(e);
+    } else if (e.needsRide && e.driverName){
+      var lbl = rideLabel(e);
+      ride = '<button type="button" class="chip" data-act="pickride" data-key="'+e.key+'" aria-label="'+esc(lbl)+'. Trykk for å endre.">'+(isBus(e.driverName) ? ICON_BUS : ICON_CAR)+esc(lbl)+'</button>';
+    } else if (e.needsRide){
+      ride = '<button type="button" class="chip warn" data-act="pickride" data-key="'+e.key+'">'+ICON_CAR+'Hvem kjører?</button>';
+    } else if (optional && statusOf(e, d) !== 'past'){
+      ride = '<button type="button" class="chip ghost" data-act="pickride" data-key="'+e.key+'" aria-label="Velg skyss til '+esc(e.title)+'">'+ICON_CAR+'Skyss</button>';
     }
     var bring = e.bring && e.bring.length ? '<div class="bring"><span>Husk:</span> '+e.bring.map(esc).join(', ')+'</div>' : '';
     return '<li class="event '+st+'">'+time+'<div class="body">'+
@@ -1006,7 +1031,12 @@
       '<section class="me-card"><h3 class="label">I morgen</h3>'+tm+'</section>';
   }
   // Tegner det som vises nå (dag eller Min dag) etter små endringer som avkrysning
-  function renderMain(){ if (state.view === 'me') renderMe(); else if (state.view === 'day') renderDay(); else render(); }
+  function renderMain(){
+    if (state.view !== 'me' && state.view !== 'day') return render();
+    var a = document.activeElement, keepFocus = a && a.classList && a.classList.contains('carpoolin') ? a.selectionStart : null;
+    if (state.view === 'me') renderMe(); else renderDay();
+    if (keepFocus !== null){ var cpi = document.querySelector('.carpoolin'); if (cpi){ cpi.focus(); try { cpi.setSelectionRange(keepFocus, keepFocus); } catch(e){} } }
+  }
 
   function renderDay(){
     var d = state.cursor;
@@ -1154,13 +1184,28 @@
 
     var packs = [];
     eventsFor(sd).forEach(function(e){ if (!e.cont) (e.bring || []).forEach(function(item){ packs.push({item:item, e:e}); }); });
+    // Forberedelser som handler om å pakke (f.eks. «Pakke sekken» til håndball i morgen)
+    var packPreps = prepTasksFor(sd).filter(function(t){ return /pakk/i.test(prepTitle(t)); });
+    var prepRows = packPreps.map(function(t){
+      var whoTxt = t.who === 'all' ? 'Alle' : nameOf(t.who);
+      var ev = t.event;
+      var bring = t.rule.pack && ev.bring && ev.bring.length ? ' · '+ev.bring.join(', ') : '';
+      return '<button type="button" class="pprep'+(t.done ? ' done' : '')+'" data-act="toggle" data-key="'+esc(t.key)+'" aria-pressed="'+t.done+'" style="--c:'+(t.who === 'all' ? 'var(--accent)' : 'var(--pal-'+P[t.who].color+')')+'">'+
+        (t.done ? ICON_CHECK : ICON_OPEN)+'<span><b>'+esc(whoTxt)+': '+esc(prepTitle(t).toLowerCase())+'</b> <small>til '+esc(ev.title)+' '+esc(whenRel(t.target, t.date))+(ev.start && !ev.allDay ? ' kl. '+ev.start : '')+esc(bring)+'</small></span></button>';
+    }).join('');
     $('packTile').innerHTML = '<h3 class="label">Pakkeliste '+label+'</h3>'+
+      (prepRows ? '<div class="ppreps">'+prepRows+'</div>' : '')+
       (packs.length ? '<div class="packs">'+packs.map(function(p){
         return '<span class="pack"><i style="background:'+evColor(p.e)+'"></i>'+esc(cap(p.item))+' <small>'+esc(evWho(p.e))+'</small></span>';
-      }).join('')+'</div>' : '<div class="muted">Ingenting å pakke</div>');
+      }).join('')+'</div>' : prepRows ? '' : '<div class="muted">Ingenting å pakke</div>');
   }
 
   function render(){
+    var a = document.activeElement, keepFocus = a && a.classList && a.classList.contains('carpoolin') ? a.selectionStart : null;
+    renderInner();
+    if (keepFocus !== null){ var cpi = document.querySelector('.carpoolin'); if (cpi){ cpi.focus(); try { cpi.setSelectionRange(keepFocus, keepFocus); } catch(e){} } }
+  }
+  function renderInner(){
     ensureCalendarFor(state.cursor);
     renderHeader();
     $('dayView').hidden = state.view !== 'day';
@@ -2019,6 +2064,12 @@
       state.own = null; render();
     }
     else if (act === 'own-cancel'){ state.own = null; renderMain(); }
+    else if (act === 'setride'){ setRide(b.dataset.key, b.dataset.v); state.picker = null; state.carpool = null; render(); }
+    else if (act === 'carpool'){
+      state.carpool = state.carpool === b.dataset.key ? null : b.dataset.key; state.carpoolText = null; renderMain();
+      var cpi = document.querySelector('.carpoolin'); if (cpi) cpi.focus();
+    }
+    else if (act === 'ride-cancel'){ state.picker = null; state.carpool = null; renderMain(); }
     else if (act === 'pickride'){ state.picker = state.picker === 'ride:'+b.dataset.key ? null : 'ride:'+b.dataset.key; renderMain(); }
     else if (act === 'me' && P[id]){
       state.me = id; state.view = 'me'; state.picker = null;
@@ -2038,7 +2089,7 @@
       var k = b.dataset.key;
       setDone(k, !state.done.has(k));
       render();
-      var t = document.querySelector('.cchip[data-key="'+k+'"]'); if (t) t.focus();
+      var t = document.querySelector('.cchip[data-key="'+k+'"]') || document.querySelector('.pprep[data-key="'+k+'"]'); if (t) t.focus();
     }
     else if (act === 'goto'){ state.cursor = fromIso(b.dataset.date); state.view = 'day'; render(); }
     else if (act === 'chat-open'){ openDrawer('chat', $('chatBtn')); }
@@ -2246,6 +2297,8 @@
       saveMembers();
       updateCodeHints();
       render();
+    } else if (t.classList.contains('carpoolin')){
+      state.carpoolText = t.value;
     } else if (t.classList.contains('mwordsin')){
       var mw = P[t.dataset.id];
       if (!mw) return;
@@ -2331,6 +2384,16 @@
     if (card && (ev.key === 'Enter' || ev.key === ' ')){ ev.preventDefault(); card.click(); }
   });
 
+  document.addEventListener('submit', function(ev){
+    var f = ev.target;
+    if (!f.classList || !f.classList.contains('carpool')) return;
+    ev.preventDefault();
+    var v = (f.querySelector('.carpoolin') || {}).value || '';
+    v = v.trim();
+    if (!v) return;
+    setRide(f.dataset.key, /^sitter på/i.test(v) ? v : 'Sitter på med '+v);
+    state.picker = null; state.carpool = null; state.carpoolText = null; render();
+  });
   $('composer').addEventListener('submit', function(ev){
     ev.preventDefault();
     var input = $('chatInput');
@@ -2585,7 +2648,7 @@
     if (DB.channel){ try { sb.removeChannel(DB.channel); } catch(e){} }
     DB.household = DB.role = DB.myMember = DB.label = null; DB.channel = null; DB.devices = null;
     members = []; syncMembers(); rules = []; preps.rules = []; dinnerEdits = {};
-    OWNERS = {event:{}, title:{}}; state.own = null;
+    OWNERS = {event:{}, title:{}}; state.own = null; RIDES = {}; state.carpool = null;
     state.done = new Set(); state.swaps = {}; state.pair = null; state.view = 'day'; state.me = null; state.drivers = {};
     GCAL.mode = 'demo'; GCAL.byDay = {}; GCAL.windows = {}; GCAL.fetchedAt = null; GCAL.failed = false; GCAL.tried = {};
   }
