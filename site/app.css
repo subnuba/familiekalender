@@ -500,3 +500,4 @@ svg{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-lin
 .pushcard{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--surface-2);font-size:14px}
 .pushcard p{margin:0}
 .pushcard .btn{align-self:flex-start}
+.ctime{font-variant-numeric:tabular-nums;font-weight:700;color:var(--c, var(--accent));margin-right:2px}

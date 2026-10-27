@@ -118,7 +118,8 @@
   function applyRules(rows){
     rules = rows.slice().sort(bySort).map(function(r){
       return {id:r.id, title:r.title, who:r.who, mode:r.mode, days:r.days || [], freq:r.freq, anchor:r.anchor,
-              dinner:r.is_dinner, from:r.valid_from, past:Array.isArray(r.history) ? r.history : [], ended:r.ended || undefined};
+              dinner:r.is_dinner, from:r.valid_from, past:Array.isArray(r.history) ? r.history : [], ended:r.ended || undefined,
+              time: r.at_time ? t5(r.at_time) : null};
     });
     DB.known.rules = {}; rows.forEach(function(r){ DB.known.rules[r.id] = true; });
   }
@@ -166,7 +167,7 @@
     if (gcalConfigured() !== (GCAL.mode === 'live')) fetchCalendar().then(render);
     var a = document.activeElement;
     var typingInSettings = a && $('settings').contains(a) && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA');
-    if (!$('settings').hidden && !typingInSettings) renderSettings();
+    if (!$('settings').hidden && !typingInSettings && Date.now() - lastWheelAt > 3000) renderSettings();
     if (!$('dinners').hidden && !state.dinnerEdit) renderDinnerList();
     render();
   }
@@ -196,7 +197,8 @@
     if (!canAdmin()) return;
     var rows = rules.map(function(r, i){
       return {id:r.id, household_id:DB.household, title:r.title, who:r.who, mode:r.mode, days:r.days, freq:r.freq, anchor:r.anchor,
-              is_dinner:!!r.dinner, valid_from:r.from || '2000-01-01', ended:r.ended || null, history:r.past || [], sort_order:i};
+              is_dinner:!!r.dinner, valid_from:r.from || '2000-01-01', ended:r.ended || null, history:r.past || [], sort_order:i,
+              at_time: r.time && !r.dinner ? r.time : null};
     });
     var ids = {}; rules.forEach(function(r){ ids[r.id] = true; });
     var gone = Object.keys(DB.known.rules).filter(function(id){ return !ids[id]; });
@@ -598,10 +600,16 @@
     dbDone(sb.from('dinners').upsert({household_id:DB.household, day:k, dish:e.dish || '', at_time:e.time || DEFAULT_TIME, updated_at:new Date().toISOString()}), 'middagen');
   }
   function validTime(s){ return typeof s === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(s); }
+  // Middag for en dag: rett og/eller klokkeslett. Bare klokkeslett (uten rett) er også en plan («Ikke bestemt kl. 18:30»).
   function dinnerFor(d){
     var e = dinnerEdits[iso(d)];
-    return e && typeof e.dish === 'string' && e.dish.trim() ? {dish:e.dish.trim(), time: validTime(e.time) ? e.time : DEFAULT_TIME} : null;
+    if (!e) return null;
+    var dish = typeof e.dish === 'string' ? e.dish.trim() : '';
+    var time = validTime(e.time) ? e.time : DEFAULT_TIME;
+    if (!dish && time === DEFAULT_TIME) return null;
+    return {dish:dish, time:time};
   }
+  function dishTxt(din){ return din && din.dish ? din.dish : 'Ikke bestemt'; }
   function recentDishes(){
     var seen = {}, out = [];
     Object.keys(dinnerEdits).sort().reverse().map(function(k){ return dinnerEdits[k] && dinnerEdits[k].dish; }).concat(DISHES).forEach(function(x){
@@ -656,15 +664,22 @@
       bases.forEach(function(b){
         var who = state.swaps[b.key];
         if (!who || !P[who]) who = b.base;
-        out.push({key:b.key, rule:r, who:who, base:b.base, swapped:who !== b.base, done:state.done.has(b.key), date:d});
+        out.push({key:b.key, rule:r, who:who, base:b.base, swapped:who !== b.base, done:state.done.has(b.key), date:d, time:choreTime(rule, r, d)});
       });
     });
-    return out;
+    // Oppgaver med klokkeslett først, i tidsrekkefølge; «hele dagen» etter
+    return out.sort(function(a,b){ return (a.time ? 0 : 1) - (b.time ? 0 : 1) || (a.time || '').localeCompare(b.time || ''); });
+  }
+  // Middagsansvar følger middagstiden; andre oppgaver har eget klokkeslett eller «hele dagen» (null).
+  // Klokkeslettet hører til oppgaven (ikke versjonen), så det gjelder også dager før en endring.
+  function choreTime(rule, r, d){
+    if (r.dinner){ var din = dinnerFor(d); return din ? din.time : DEFAULT_TIME; }
+    return validTime(rule.time) ? rule.time : null;
   }
   function choreLabel(c){
     var t = c.rule.title.trim() || 'Uten navn';
     var din = c.rule.dinner ? dinnerFor(c.date) : null;
-    return din ? t+': '+din.dish : t;
+    return din && din.dish ? t+': '+din.dish : t;
   }
   function cooksFor(d){ return choresFor(d).filter(function(c){ return c.rule.dinner; }).map(function(c){ return c.who; }); }
 
@@ -750,13 +765,16 @@
       if (notif.prep) dayPreps.filter(function(t){ return t.who === m.id; }).forEach(function(t){
         out.push({who:m.id, time:pn.time, kind:'prep', title:prepTitle(t), body:prepSub(t), key:t.key, done:t.done});
       });
+      // Oppgaver med klokkeslett varsles på klokkeslettet; «hele dagen»-oppgaver på kveldstiden
       if (notif.chores) chores.filter(function(c){ return c.who === m.id && !c.rule.dinner; }).forEach(function(c){
-        out.push({who:m.id, time:pn.time, kind:'chore', title:choreLabel(c), body:'Fast oppgave i dag', key:c.key, done:c.done});
+        out.push(c.time
+          ? {who:m.id, time:c.time, kind:'chore', title:choreLabel(c), body:'Kl. '+c.time+' i dag', key:c.key, done:c.done}
+          : {who:m.id, time:pn.time, kind:'chore', title:choreLabel(c), body:'Fast oppgave i dag', key:c.key, done:c.done});
       });
       if (notif.dinner) chores.filter(function(c){ return c.who === m.id && c.rule.dinner; }).forEach(function(c){
         var din = dinnerFor(d);
         out.push({who:m.id, time:hm(toMin(din ? din.time : DEFAULT_TIME) - notif.dinnerLead), kind:'dinner', title:'Du har middag i dag',
-          body: din ? din.dish+' kl. '+din.time : 'Middagen er ikke bestemt ennå', key:c.key, done:c.done});
+          body: din && din.dish ? din.dish+' kl. '+din.time : 'Middagen er ikke bestemt ennå'+(din ? ' · kl. '+din.time : ''), key:c.key, done:c.done});
       });
       if (notif.morning){
         var mine = evts.filter(function(e){ return isFor(e, m.id); });
@@ -959,7 +977,7 @@
     var open = state.picker === 'swap:'+c.key;
     var html = '<div class="chore'+(c.done?' done':'')+'">'+
       '<label class="chore-l" for="'+id+'"><input type="checkbox" id="'+id+'" data-act="chore" data-key="'+c.key+'"'+(c.done?' checked':'')+'>'+
-      '<span class="ct"><span>'+esc(choreLabel(c))+'</span>'+(tag ? '<small>'+esc(tag)+'</small>' : '')+'</span></label>'+
+      '<span class="ct"><span>'+(c.time && !c.rule.dinner ? '<b class="ctime">'+c.time+'</b> ' : '')+esc(choreLabel(c))+'</span>'+(tag ? '<small>'+esc(tag)+'</small>' : '')+'</span></label>'+
       '<button type="button" class="swapbtn" data-act="pickswap" data-key="'+c.key+'" aria-expanded="'+open+'">Bytt</button></div>';
     if (open){
       html += '<div class="swaprow"><span class="lbl-sm">Gi til</span>'+members.filter(function(m){ return m.id !== c.who; }).map(function(m){
@@ -1023,7 +1041,7 @@
       sub = cur ? 'Nå: '+cur.title : nxt ? 'Neste: '+nxt.title+' '+rel(nxt.startMin - n) : (timed.length ? 'Ferdig med avtalene for i dag' : evts.length ? evts[0].title : 'Ingen avtaler i dag');
     } else sub = evts.length ? evts.length+' '+(evts.length === 1 ? 'avtale' : 'avtaler') : 'Ingen avtaler';
     var dinner = din
-      ? '<div class="me-row"><span class="t">'+din.time+'</span><span>'+esc(din.dish)+
+      ? '<div class="me-row"><span class="t">'+din.time+'</span><span>'+esc(dishTxt(din))+
           (cooks.indexOf(id) > -1 ? ' · <b>du lager middag</b>' : cooks.length ? ' <small>· '+esc(names(cooks))+' lager</small>' : '')+'</span></div>'
       : '<p class="empty">Ikke bestemt ennå</p>';
     var tm = tomorrow.length ? tomorrow.map(function(e){
@@ -1108,7 +1126,7 @@
       html += '<div class="daycard'+(isToday(d) ? ' today' : '')+'" role="button" tabindex="0" data-act="goto" data-date="'+iso(d)+'" aria-label="Vis '+dayName(d)+' '+dateLong(d)+'">'+
         '<div class="dc-head"><span class="dc-day">'+dayName(d)+'</span><span class="dc-date">'+d.getDate()+'.</span></div>'+
         '<ul class="dc-list">'+(items || '<li class="dc-empty">Ingen avtaler</li>')+'</ul>'+
-        '<div class="dc-dinner"><small>Middag'+(din ? ' '+din.time : '')+(cooks.length ? ' · '+esc(names(cooks)) : '')+'</small>'+(din ? esc(din.dish) : '<span class="muted">Ikke bestemt</span>')+'</div></div>';
+        '<div class="dc-dinner"><small>Middag'+(din ? ' '+din.time : '')+(cooks.length ? ' · '+esc(names(cooks)) : '')+'</small>'+(din && din.dish ? esc(din.dish) : '<span class="muted">Ikke bestemt</span>')+'</div></div>';
     }
     $('weekgrid').innerHTML = html;
   }
@@ -1124,7 +1142,7 @@
       tag = 'til '+c.event.title+' '+whenRel(c.target, d);
     } else {
       var dd = c.rule.dinner ? dinnerFor(d) : null;
-      label = c.rule.dinner ? 'Middag: '+(dd ? dd.dish : 'ikke bestemt') : (c.rule.title.trim() || 'Uten navn');
+      label = c.rule.dinner ? 'Middag: '+(dd && dd.dish ? dd.dish : 'ikke bestemt') : (c.rule.title.trim() || 'Uten navn');
       tag = choreTag(c);
     }
     var stText = {done:'gjort', missed:'glemt', today:'ikke gjort ennå', future:'kommer'}[st];
@@ -1185,7 +1203,7 @@
     $('dinnerTile').innerHTML = '<h3 class="label">Middag '+label+'</h3>'+
       '<button type="button" class="tile-btn" data-act="dinner-open" aria-label="Åpne middagsplanen" title="Middagsplan">'+
         '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16M8 14h8M8 17h5"/></svg></button>'+
-      '<div class="dinner-name'+(din ? '' : ' none')+'">'+(din ? esc(din.dish) : 'Ikke bestemt')+'</div>'+
+      '<div class="dinner-name'+(din && din.dish ? '' : ' none')+'">'+esc(dishTxt(din))+'</div>'+
       '<div class="dinner-meta">'+(cooks.length ? esc(names(cooks))+' lager' : 'Ingen har middagsansvar')+(din ? ' · kl. '+din.time : '')+'</div>';
 
     var t = today();
@@ -1304,6 +1322,9 @@
 
   /* ---------- Innstillinger: faste oppgaver ---------- */
   function ruleSummary(r){
+    return ruleSummaryBase(r)+(!r.dinner && validTime(r.time) ? ' · kl. '+r.time : '');
+  }
+  function ruleSummaryBase(r){
     var people = rulePeople(r);
     var who = r.who === 'all' ? 'Alle' : (people.length ? names(people) : 'Ingen valgt');
     if (r.mode === 'rotate' && people.length > 1) who = 'Bytter på: '+(r.who === 'all' ? 'alle' : names(people));
@@ -1351,6 +1372,11 @@
         '<button type="button" data-act="r-freq" data-id="'+r.id+'" data-freq="biweekly" aria-pressed="'+(r.freq==='biweekly')+'">Annenhver uke</button>'+
       '</div></div>'+
       start+
+      (r.dinner ? '<p class="hint">Tidspunktet følger middagsplanen.</p>' :
+        '<div class="field"><span class="label">Tidspunkt</span><div class="seg sm" role="group" aria-label="Tidspunkt">'+
+          '<button type="button" data-act="r-time" data-id="'+r.id+'" data-t="" aria-pressed="'+!validTime(r.time)+'">Hele dagen</button>'+
+          '<button type="button" data-act="r-time" data-id="'+r.id+'" data-t="on" aria-pressed="'+validTime(r.time)+'">Klokkeslett</button>'+
+        '</div></div>'+(validTime(r.time) ? timeFieldHTML('rule-'+r.id, r.time) : ''))+
       '<label class="toggle" for="dinner-'+r.id+'"><input type="checkbox" id="dinner-'+r.id+'" data-act="r-dinner" data-id="'+r.id+'"'+(r.dinner?' checked':'')+'>Middagsansvar <small>vises i middagsfeltet</small></label>'+
       '<div class="rule-actions"><button type="button" class="btn" data-act="r-close" data-id="'+r.id+'">Ferdig</button>'+
         '<button type="button" class="linkbtn danger'+(confirming?' confirm':'')+'" data-act="r-delete" data-id="'+r.id+'">'+(confirming ? 'Trykk igjen for å slette' : 'Slett oppgaven')+'</button></div>'+
@@ -1574,6 +1600,7 @@
     var rc = state.confirm === 'reset';
     $('resetBtn').textContent = rc ? 'Trykk igjen for å tilbakestille' : 'Tilbakestill';
     $('resetBtn').className = 'linkbtn' + (rc ? ' danger confirm' : '');
+    if (tab === 'chores') initRuleWheels();
   }
 
   function selectorFor(b){
@@ -1587,6 +1614,7 @@
 
   function membersChanged(){ syncMembers(); saveMembers(); renderSettings(); render(); }
   function rulesChanged(){ saveRules(); renderSettings(); render(); }
+  function initRuleWheels(){ var er = state.editRule && ruleById(state.editRule); if (er && validTime(er.time) && !er.dinner) initWheels('rule-'+er.id); }
 
   /* ---------- Tidshjul ---------- */
   // Hjulene går rundt: tallrekka gjentas mange ganger, og når hjulet stopper
@@ -1615,7 +1643,9 @@
       '</div><input type="hidden" id="time-'+k+'" value="'+pad(hi)+':'+pad(mi*5)+'"></div>';
   }
   function clampAbs(w, a){ return Math.max(0, Math.min(Number(w.dataset.total)-1, a)); }
+  var lastWheelAt = 0;
   function markWheel(w, abs){
+    lastWheelAt = Date.now();
     var kind = w.dataset.wheel, n = wheelN(kind);
     var idx = ((abs % n) + n) % n, v = idx*wheelStep(kind);
     var prev = w.querySelector('.witem.on'); if (prev) prev.classList.remove('on');
@@ -1625,7 +1655,18 @@
     w.setAttribute('aria-valuenow', String(v));
     w.setAttribute('aria-valuetext', pad(v));
     var k = w.dataset.date, h = $('wh-'+k), m = $('wm-'+k), hid = $('time-'+k);
-    if (h && m && hid) hid.value = pad(Number(h.dataset.idx))+':'+pad(Number(m.dataset.idx)*5);
+    if (h && m && hid){
+      hid.value = pad(Number(h.dataset.idx))+':'+pad(Number(m.dataset.idx)*5);
+      if (k.indexOf('rule-') === 0) ruleTimeChanged(k.slice(5), hid.value);
+    }
+  }
+  function ruleTimeChanged(id, t){
+    var r = ruleById(id);
+    if (!r || r.time === t) return;
+    r.time = t;
+    saveRules();
+    var sm = document.querySelector('.rule.open .rule-sum'); if (sm) sm.textContent = ruleSummary(r);
+    later('rule-time-render', render, 400);
   }
   function setWheel(w, abs, smooth){
     abs = clampAbs(w, abs);
@@ -1660,10 +1701,10 @@
     var din = dinnerFor(d);
     var cooks = cooksFor(d);
     var editing = state.dinnerEdit === k;
-    var html = '<button type="button" class="drow'+(isToday(d) ? ' today' : '')+(din ? '' : ' empty')+'" data-act="dinner-edit" data-date="'+k+'" aria-expanded="'+editing+'">'+
+    var html = '<button type="button" class="drow'+(isToday(d) ? ' today' : '')+(din && din.dish ? '' : ' empty')+'" data-act="dinner-edit" data-date="'+k+'" aria-expanded="'+editing+'">'+
       '<span class="d-date">'+pad(d.getDate())+'.'+pad(d.getMonth()+1)+'.</span>'+
       '<span class="d-wd">'+dayName(d)+'</span>'+
-      '<span class="d-text"><span>'+(din ? esc(din.dish) : 'Ikke bestemt')+'</span>'+(cooks.length ? '<small>'+esc(names(cooks))+' lager</small>' : '')+'</span>'+
+      '<span class="d-text"><span>'+esc(dishTxt(din))+'</span>'+(cooks.length ? '<small>'+esc(names(cooks))+' lager</small>' : '')+'</span>'+
       '<span class="d-time">'+(din ? din.time : '–')+'</span></button>';
     if (editing){
       html += '<div class="dedit">'+
@@ -1700,7 +1741,7 @@
 
   function saveDinner(k, dish, time){
     dish = (dish || '').trim();
-    dinnerEdits[k] = dish ? {dish:dish, time: validTime(time) ? time : DEFAULT_TIME} : {dish:''};
+    dinnerEdits[k] = {dish:dish, time: validTime(time) ? time : DEFAULT_TIME};
     saveDinnerEdits(k);
     state.dinnerEdit = null;
     renderDinnerList(); render();
@@ -1953,7 +1994,7 @@
     });
     var cooks = cooksFor(t);
     var din = dinnerFor(t);
-    return {role:'bot', text:dayName(t)+' '+dateLong(t)+':\n'+(lines.join('\n') || 'Ingen avtaler.')+'\n\nMiddag: '+(din ? din.dish+' kl. '+din.time : 'ikke bestemt ennå')+(cooks.length ? ' ('+names(cooks)+' lager).' : '. Ingen har middagsansvar.')};
+    return {role:'bot', text:dayName(t)+' '+dateLong(t)+':\n'+(lines.join('\n') || 'Ingen avtaler.')+'\n\nMiddag: '+(din ? dishTxt(din).toLowerCase()+' kl. '+din.time : 'ikke bestemt ennå')+(cooks.length ? ' ('+names(cooks)+' lager).' : '. Ingen har middagsansvar.')};
   }
 
   function demoDinners(){
@@ -1963,7 +2004,7 @@
       var d = addDays(t, i - wd(t));
       var cooks = cooksFor(d);
       var din = dinnerFor(d);
-      rows.push('• '+dayName(d)+': '+(din ? din.dish+' kl. '+din.time : 'ikke bestemt')+' ('+(cooks.length ? names(cooks) : 'ingen satt')+')');
+      rows.push('• '+dayName(d)+': '+(din ? dishTxt(din)+' kl. '+din.time : 'ikke bestemt')+' ('+(cooks.length ? names(cooks) : 'ingen satt')+')');
     }
     return {role:'bot', text:'Middager resten av uka:\n'+rows.join('\n')};
   }
@@ -2249,7 +2290,9 @@
         var ti = $('title-'+rid); if (ti){ ti.focus(); ti.scrollIntoView({block:'nearest'}); }
       }
     }
-    else if (act === 'r-edit'){ state.editRule = state.editRule === id ? null : id; state.confirm = null; renderSettings(); refocus(sel); }
+    else if (act === 'r-edit'){
+      state.editRule = state.editRule === id ? null : id; state.confirm = null; renderSettings(); refocus(sel);
+    }
     else if (act === 'r-close'){ state.editRule = null; state.confirm = null; renderSettings(); refocus('[data-act="r-edit"][data-id="'+id+'"]'); }
     else if (r && act === 'r-all'){ beginEdit(r); r.who = r.who === 'all' ? [members[0].id] : 'all'; rulesChanged(); refocus(sel); }
     else if (r && act === 'r-who'){
@@ -2268,6 +2311,11 @@
       rulesChanged(); refocus(sel);
     }
     else if (r && act === 'r-everyday'){ beginEdit(r); r.days = r.days.length === 7 ? [] : [0,1,2,3,4,5,6]; rulesChanged(); refocus(sel); }
+    else if (r && act === 'r-time'){
+      r.time = b.dataset.t ? (validTime(r.time) ? r.time : '17:00') : null;
+      rulesChanged();
+      refocus(sel);
+    }
     else if (r && act === 'r-freq'){
       beginEdit(r);
       r.freq = b.dataset.freq;
