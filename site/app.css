@@ -474,3 +474,13 @@ svg{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-lin
 .time.allday .t-start{font-size:15px}
 .time.allday .t-end{white-space:nowrap}
 .field > small.hint{display:block;margin-top:4px;font-size:12.5px}
+
+/* «Hvem gjelder dette?»: trykk på tittelen til en avtale */
+.ev-title{display:inline;padding:0;margin:0;border:0;background:none;font:inherit;color:inherit;text-align:left;cursor:pointer;border-radius:4px;overflow-wrap:anywhere}
+.ev-title:hover{text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:3px}
+.ev-title[aria-expanded="true"]{text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:3px}
+.ownpick{margin-top:8px;display:flex;flex-direction:column;gap:8px;padding:10px 12px;border-radius:12px;background:var(--surface-2);border:1px solid var(--line);font-weight:400;font-size:14px;flex-basis:100%}
+.ownpick .hint{margin:0;font-size:12.5px}
+.own-acts{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.btn.sm{min-height:36px;padding:0 14px;font-size:13.5px;white-space:normal;text-align:left;line-height:1.2}
+.chip.person[aria-pressed="false"]{border-color:var(--c)}

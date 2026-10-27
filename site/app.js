@@ -140,6 +140,7 @@
   function applyDinners(rows){ dinnerEdits = {}; rows.forEach(function(r){ dinnerEdits[r.day] = {dish:r.dish, time:t5(r.at_time)}; }); }
   function applyCompletions(rows){ state.done = new Set(rows.map(function(r){ return r.task_key; })); }
   function applySwaps(rows){ state.swaps = {}; rows.forEach(function(r){ state.swaps[r.task_key] = r.member_id; }); }
+  function applyOwners(rows){ OWNERS = {event:{}, title:{}}; rows.forEach(function(r){ if (OWNERS[r.scope]) OWNERS[r.scope][r.match] = r.who; }); }
 
   function q(p){ return p.then(function(res){ if (res.error) throw res.error; return res.data; }); }
   var LOADERS = {
@@ -149,7 +150,8 @@
     household_settings: function(){ return q(sb.from('household_settings').select('*').eq('household_id', DB.household).maybeSingle()).then(applySettings); },
     dinners: function(){ return q(sb.from('dinners').select('*').eq('household_id', DB.household).gte('day', iso(addDays(today(), -60)))).then(applyDinners); },
     completions: function(){ return q(sb.from('completions').select('task_key').eq('household_id', DB.household).gte('done_at', addDays(today(), -60).toISOString())).then(applyCompletions); },
-    swaps: function(){ return q(sb.from('swaps').select('*').eq('household_id', DB.household)).then(applySwaps); }
+    swaps: function(){ return q(sb.from('swaps').select('*').eq('household_id', DB.household)).then(applySwaps); },
+    event_owners: function(){ return q(sb.from('event_owners').select('scope, match, who').eq('household_id', DB.household)).then(applyOwners); }
   };
   function loadAll(){
     // Medlemmer først: de andre tabellene viser til dem. Tabeller med endringer som ikke er lagret ennå, hoppes over.
@@ -234,6 +236,23 @@
     if (on) state.done.add(key); else state.done.delete(key);
     if (on) dbDone(sb.from('completions').upsert({household_id:DB.household, task_key:key, done_by:DB.myMember || null, done_at:new Date().toISOString()}), 'avkrysningen');
     else dbDone(sb.from('completions').delete().eq('household_id', DB.household).eq('task_key', key), 'avkrysningen');
+  }
+  // «Hvem gjelder dette?» (trykk på en avtale): bare denne forekomsten eller alle med samme tittel
+  var OWNERS = {event:{}, title:{}};
+  function titleKey(t){ return String(t || '').trim().toLowerCase().replace(/\s+/g, ' '); }
+  function ownerFor(id, title){
+    if (OWNERS.event[id] !== undefined) return {scope:'event', who:OWNERS.event[id]};
+    var tk = titleKey(title);
+    if (tk && OWNERS.title[tk] !== undefined) return {scope:'title', who:OWNERS.title[tk]};
+    return null;
+  }
+  function setOwner(scope, match, who){
+    OWNERS[scope][match] = who;
+    dbDone(sb.from('event_owners').upsert({household_id:DB.household, scope:scope, match:match, who:who, updated_at:new Date().toISOString()}), 'hvem avtalen gjelder');
+  }
+  function clearOwner(scope, match){
+    delete OWNERS[scope][match];
+    dbDone(sb.from('event_owners').delete().eq('household_id', DB.household).eq('scope', scope).eq('match', match), 'hvem avtalen gjelder');
   }
   function setSwap(key, who){
     if (who){
@@ -770,6 +789,11 @@
     return list.map(function(e){
       var k = key+'|'+e.id;
       var pt = parseTitle(e.title, e.kilde);
+      var ov = ownerFor(e.id, e.title);
+      if (ov){
+        var ow = ov.who === 'all' ? ['all'] : (Array.isArray(ov.who) ? ov.who.filter(function(id){ return P[id]; }) : []);
+        if (ow.length) pt = {whos:ow, title:pt.title, owned:ov.scope};
+      }
       var pd = parseDesc(e.desc);
       var driverId = pd.driverId, driverName = pd.driverName;
       if (state.drivers[k] !== undefined){
@@ -780,7 +804,7 @@
       var s = all ? 0 : toMin(e.start);
       return {
         id:e.id, key:k, raw:e.title, title:pt.title, whos:pt.whos, who: pt.whos.length === 1 ? pt.whos[0] : 'many',
-        unknown:pt.unknown || null, byName:!!pt.byName, allDay:all, cont:!!e.cont, untilLater:!!e.untilLater, endsAt:e.endsAt || null,
+        unknown:pt.owned ? null : (pt.unknown || null), byName:!!pt.byName, owned:pt.owned || null, allDay:all, cont:!!e.cont, untilLater:!!e.untilLater, endsAt:e.endsAt || null,
         start:e.start, end:e.end, place:e.place, startMin:s, endMin: all || e.untilLater ? 1440 : e.end ? toMin(e.end) : s+60,
         needsRide:pd.needsRide && !all, driver:driverId, driverName:driverName, bring:pd.bring, other:pd.other
       };
@@ -827,6 +851,34 @@
     state.demoExtras[iso(thu)] = [{id:'x-klassetur', title:'OL - Klassetur til Ringve museum', start:'08:30', end:'14:30', place:'Skolen', desc:'Husk: matpakke, drikkeflaske, regntøy'}];
   }
 
+  /* ---------- «Hvem gjelder dette?» ---------- */
+  function sameTitleCount(title){
+    var tk = titleKey(title), seen = {};
+    Object.keys(GCAL.byDay).forEach(function(k){ GCAL.byDay[k].forEach(function(e){ if (titleKey(e.title) === tk) seen[e.id] = true; }); });
+    return Object.keys(seen).length;
+  }
+  function ownPickerHTML(e){
+    var o = state.own;
+    var sel = o.sel;
+    var chips = members.map(function(m){
+      var on = sel !== 'all' && sel.indexOf(m.id) > -1;
+      return '<button type="button" class="chip person" style="--c:var(--pal-'+m.color+')" data-act="own-who" data-who="'+m.id+'" aria-pressed="'+on+'">'+esc(nameOf(m.id))+'</button>';
+    }).join('') + '<button type="button" class="chip" data-act="own-all" aria-pressed="'+(sel === 'all')+'">Hele familien</button>';
+    var n = GCAL.mode === 'live' ? sameTitleCount(e.raw) : 0;
+    var empty = sel !== 'all' && !sel.length;
+    return '<div class="ownpick" role="group" aria-label="Hvem gjelder «'+esc(e.title)+'»?">'+
+      '<span class="lbl-sm">Hvem gjelder dette?</span><div class="chips">'+chips+'</div>'+
+      '<div class="own-acts">'+
+        '<button type="button" class="btn sm primary" data-act="own-save" data-scope="title"'+(empty ? ' disabled' : '')+'>Alle «'+esc(e.raw)+'»'+(n > 1 ? ' ('+n+')' : '')+'</button>'+
+        '<button type="button" class="btn sm" data-act="own-save" data-scope="event"'+(empty ? ' disabled' : '')+'>Bare denne gangen</button>'+
+        (e.owned ? '<button type="button" class="linkbtn" data-act="own-reset">Tilbakestill</button>' : '')+
+        '<button type="button" class="linkbtn" data-act="own-cancel">Avbryt</button>'+
+      '</div>'+
+      (e.owned ? '<p class="hint">Valgt for hånd ('+(e.owned === 'event' ? 'bare denne gangen' : 'alle med samme tittel')+'). «Tilbakestill» går tilbake til koden eller ordene i tittelen.</p>' : '')+
+    '</div>';
+  }
+  function ownOpen(e){ return state.own && state.own.key === e.key; }
+
   /* ---------- Tegning: dag ---------- */
   function eventHTML(e,d,laneId){
     var st = statusOf(e,d);
@@ -850,10 +902,10 @@
     }
     var bring = e.bring && e.bring.length ? '<div class="bring"><span>Husk:</span> '+e.bring.map(esc).join(', ')+'</div>' : '';
     return '<li class="event '+st+'">'+time+'<div class="body">'+
-      '<div class="title">'+esc(e.title)+(st==='now' ? '<span class="nowtag">Nå</span>' : '')+'</div>'+
+      '<div class="title"><button type="button" class="ev-title" data-act="pickown" data-key="'+esc(e.key)+'" aria-expanded="'+ownOpen(e)+'" aria-label="'+esc(e.title)+'. Trykk for å velge hvem den gjelder.">'+esc(e.title)+'</button>'+(st==='now' ? '<span class="nowtag">Nå</span>' : '')+'</div>'+
       (e.place ? '<div class="place">'+esc(e.place)+'</div>' : '')+
       (others === null ? '<div class="place">Hele familien</div>' : others.length ? '<div class="place">Sammen med '+esc(names(others))+'</div>' : '')+bring+
-      (ride ? '<div class="ride">'+ride+'</div>' : '')+
+      (ride ? '<div class="ride">'+ride+'</div>' : '')+(ownOpen(e) ? ownPickerHTML(e) : '')+
       '</div></li>';
   }
 
@@ -969,9 +1021,9 @@
     famEl.innerHTML = fam.map(function(e){
       return '<div class="fam-item">'+dots+
         '<span class="fam-label">Hele familien</span><span class="t">'+timeTxt(e)+'</span>'+
-        '<span class="ti">'+esc(e.title)+'</span>'+(e.place ? '<span class="muted">'+esc(e.place)+'</span>' : '')+
+        '<button type="button" class="ti ev-title" data-act="pickown" data-key="'+esc(e.key)+'" aria-expanded="'+ownOpen(e)+'" aria-label="'+esc(e.title)+'. Trykk for å velge hvem den gjelder.">'+esc(e.title)+'</button>'+(e.place ? '<span class="muted">'+esc(e.place)+'</span>' : '')+
         (e.bring && e.bring.length ? '<span class="muted">Husk: '+e.bring.map(esc).join(', ')+'</span>' : '')+
-        (e.unknown ? '<span class="fam-unknown">Ukjent kode «'+esc(e.unknown.join('+'))+'»</span>' : '')+'</div>';
+        (e.unknown ? '<span class="fam-unknown">Ukjent kode «'+esc(e.unknown.join('+'))+'»</span>' : '')+(ownOpen(e) ? ownPickerHTML(e) : '')+'</div>';
     }).join('') + famPreps.map(function(t){
       var id = 'fp-'+t.key.replace(/[^a-z0-9]/gi,'-');
       return '<label class="fam-item fam-prep'+(t.done ? ' done' : '')+'" for="'+id+'">'+
@@ -1471,6 +1523,7 @@
       return '[data-'+attr+'="'+String(b.dataset[k]).replace(/"/g,'\\"')+'"]';
     }).join('');
   }
+  function refocus2(sel){ var el = sel && document.querySelector(sel); if (el && !el.disabled) el.focus(); }
   function refocus(sel){ var el = sel && document.querySelector('#settings '+sel); if (el && !el.disabled) el.focus(); }
 
   function membersChanged(){ syncMembers(); saveMembers(); renderSettings(); render(); }
@@ -1934,6 +1987,38 @@
       else state.cursor = addDays(state.cursor, dir * (state.view === 'day' || state.view === 'me' ? 1 : 7));
       state.picker = null; render();
     }
+    else if (act === 'pickown'){
+      var ek = b.dataset.key;
+      if (state.own && state.own.key === ek) state.own = null;
+      else {
+        var ev = eventsFor(fromIso(ek.slice(0,10))).filter(function(x){ return x.key === ek; })[0];
+        if (ev) state.own = {key:ek, id:ev.id, raw:ev.raw, sel: ev.who === 'all' ? 'all' : ev.whos.slice()};
+      }
+      state.picker = null; renderMain();
+      var again = document.querySelector('[data-act="pickown"][data-key="'+ek.replace(/"/g,'\\"')+'"]'); if (again) again.focus();
+    }
+    else if (act === 'own-who' && state.own){
+      var ow = b.dataset.who, cur = state.own.sel === 'all' ? [] : state.own.sel;
+      state.own.sel = cur.indexOf(ow) > -1 ? cur.filter(function(x){ return x !== ow; }) : cur.concat([ow]);
+      renderMain(); refocus2(sel);
+    }
+    else if (act === 'own-all' && state.own){ state.own.sel = 'all'; renderMain(); refocus2(sel); }
+    else if (act === 'own-save' && state.own){
+      var so = state.own, who = so.sel === 'all' ? 'all' : members.map(function(m){ return m.id; }).filter(function(id){ return so.sel.indexOf(id) > -1; });
+      if (b.dataset.scope === 'title'){
+        var hadOne = OWNERS.event[so.id] !== undefined;   // «Alle» erstatter et valg for bare denne gangen
+        setOwner('title', titleKey(so.raw), who);
+        if (hadOne) clearOwner('event', so.id);
+      }
+      else setOwner('event', so.id, who);
+      state.own = null; render();
+    }
+    else if (act === 'own-reset' && state.own){
+      var ro = state.own;
+      if (OWNERS.event[ro.id] !== undefined) clearOwner('event', ro.id); else clearOwner('title', titleKey(ro.raw));
+      state.own = null; render();
+    }
+    else if (act === 'own-cancel'){ state.own = null; renderMain(); }
     else if (act === 'pickride'){ state.picker = state.picker === 'ride:'+b.dataset.key ? null : 'ride:'+b.dataset.key; renderMain(); }
     else if (act === 'me' && P[id]){
       state.me = id; state.view = 'me'; state.picker = null;
@@ -2500,6 +2585,7 @@
     if (DB.channel){ try { sb.removeChannel(DB.channel); } catch(e){} }
     DB.household = DB.role = DB.myMember = DB.label = null; DB.channel = null; DB.devices = null;
     members = []; syncMembers(); rules = []; preps.rules = []; dinnerEdits = {};
+    OWNERS = {event:{}, title:{}}; state.own = null;
     state.done = new Set(); state.swaps = {}; state.pair = null; state.view = 'day'; state.me = null; state.drivers = {};
     GCAL.mode = 'demo'; GCAL.byDay = {}; GCAL.windows = {}; GCAL.fetchedAt = null; GCAL.failed = false; GCAL.tried = {};
   }
