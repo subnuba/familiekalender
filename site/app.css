@@ -470,3 +470,6 @@ svg{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-lin
 /* Lagrer / feil i bunnlinja */
 .foot-r{display:inline-flex;gap:12px}
 #syncStatus.bad{color:var(--bad);font-weight:600}
+#footNote.bad{color:var(--bad);font-weight:600}
+.time.allday .t-start{font-size:15px}
+.time.allday .t-end{white-space:nowrap}

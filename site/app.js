@@ -157,6 +157,7 @@
     });
   }
   function afterRemoteChange(){
+    if (gcalConfigured() !== (GCAL.mode === 'live')) fetchCalendar().then(render);
     var a = document.activeElement;
     var typingInSettings = a && $('settings').contains(a) && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA');
     if (!$('settings').hidden && !typingInSettings) renderSettings();
@@ -381,7 +382,7 @@
   }
 
   /* ---------- Eksempeldata: avtaler, middager, bursdager ---------- */
-  // Ukemal slik avtalene ser ut i Google Kalender «familie», indeks 0 = mandag.
+  // Eksempler (til Google Kalender er koblet til): ukemal slik avtalene ser ut i «Family», indeks 0 = mandag.
   // Tittel starter med kode, beskrivelsen har «Sjåfør:» og «Husk:». Blandet skrivemåte («El», «M») er med med vilje.
   var WEEK = [
     [
@@ -424,6 +425,124 @@
   ];
   var DISHES = ['Fiskegrateng','Kyllingwok','Pasta bolognese','Fiskekaker med potet','Fredagstaco','Hjemmelaget pizza','Ovnsbakt kylling'];
   var DEFAULT_TIME = '17:30';
+
+  /* ---------- Avtaler fra Google Kalender «Family» ---------- */
+  // Hentes via Netlify-funksjonen /api/kalender (tjenestekonto som kalenderen er delt med).
+  // Til kalenderen er koblet til (gcal_calendar_id i innstillingene), vises ukemalen over som eksempler.
+  var GCAL = {mode:'demo', byDay:{}, windows:{}, fetchedAt:null, failed:false, error:'', name:'', busy:null, tried:{}};
+  var GCAL_REFRESH = 2*60000;
+  var pendingDrivers = {};
+  function gcalConfigured(){ return !!(DB.settings && DB.settings.gcal_calendar_id); }
+  function addEv(byDay, k, ev){ (byDay[k] = byDay[k] || []).push(ev); }
+  // Fra Google-avtaler til appens format per dato. Heldags og avtaler over flere dager vises hver dag.
+  function spreadEvents(list){
+    var byDay = {};
+    list.forEach(function(a){
+      var base = {id:a.id, title:a.tittel, place:a.sted || '', desc:a.beskrivelse || '', recurring:!!a.gjentas};
+      if (a.heleDagen){
+        var d = fromIso(a.start.slice(0,10)), end = fromIso((a.slutt || a.start).slice(0,10));   // sluttdato er dagen etter
+        if (end <= d) end = addDays(d, 1);
+        for (var i=0; d < end && i < 62; i++, d = addDays(d,1)) addEv(byDay, iso(d), Object.assign({}, base, {allDay:true, start:null, end:null}));
+        return;
+      }
+      var st = new Date(a.start), en = new Date(a.slutt || a.start);
+      if (en < st) en = st;
+      var sd = startOfDay(st), ed = startOfDay(new Date(Math.max(st.getTime(), en.getTime() - 1)));
+      if (+sd === +ed){ addEv(byDay, iso(sd), Object.assign({}, base, {start:hhmm(st), end: en > st ? hhmm(en) : null})); return; }
+      addEv(byDay, iso(sd), Object.assign({}, base, {start:hhmm(st), end:null, untilLater:true}));
+      for (var j=1, dd = addDays(sd,1); dd <= ed && j < 62; j++, dd = addDays(dd,1)){
+        addEv(byDay, iso(dd), Object.assign({}, base, {allDay:true, start:null, end:null, cont:true, endsAt: +dd === +ed ? hhmm(en) : null}));
+      }
+    });
+    return byDay;
+  }
+  function gcalWindow(d){ var m = mondayOf(d); return {from: iso(addDays(m, -7)), to: iso(addDays(m, 63))}; }
+  // Hentede tidsrom (fra → til). Datoer utenfor hentes når noen blar dit.
+  function inGcalWindow(d){ var k = iso(d); return Object.keys(GCAL.windows).some(function(f){ return k >= f && k < GCAL.windows[f]; }); }
+  function apiHeaders(){
+    return sb.auth.getSession().then(function(r){
+      var s = r.data && r.data.session;
+      return s ? {Authorization:'Bearer '+s.access_token, 'Content-Type':'application/json'} : {'Content-Type':'application/json'};
+    });
+  }
+  function apiCall(method, path, body){
+    return apiHeaders().then(function(h){
+      return fetch(path, {method:method, headers:h, body: body ? JSON.stringify(body) : undefined});
+    }).then(function(res){
+      return res.json().catch(function(){ return {}; }).then(function(b){
+        if (!res.ok) throw Object.assign(new Error(b.melding || ('HTTP '+res.status)), {kode:b.feil, status:res.status});
+        return b;
+      });
+    });
+  }
+  function fetchCalendar(around){
+    if (!sb || !DB.household || !gcalConfigured()){ GCAL.mode = 'demo'; renderFootNote(); return Promise.resolve(); }
+    GCAL.mode = 'live';
+    var w = gcalWindow(around || today());
+    if (GCAL.busy) return GCAL.busy;
+    GCAL.tried[w.from] = Date.now();
+    GCAL.busy = apiCall('GET', '/api/kalender?fra='+w.from+'&til='+w.to).then(function(b){
+      // Bytt ut datoene i dette tidsrommet; andre hentede datoer står
+      var fresh = spreadEvents(b.avtaler || []);
+      Object.keys(GCAL.byDay).forEach(function(k){ if (k >= w.from && k < w.to) delete GCAL.byDay[k]; });
+      Object.keys(fresh).forEach(function(k){ if (k >= w.from && k < w.to) GCAL.byDay[k] = fresh[k]; });
+      Object.keys(GCAL.windows).forEach(function(f){ if (f !== w.from && f >= w.from && GCAL.windows[f] <= w.to) delete GCAL.windows[f]; });
+      GCAL.windows[w.from] = w.to;
+      GCAL.fetchedAt = new Date(); GCAL.failed = false; GCAL.error = ''; GCAL.name = b.kalender || '';
+      Object.keys(state.drivers).forEach(function(k){ if (!pendingDrivers[k]) delete state.drivers[k]; });   // nå lagret i Google
+    }).catch(function(e){
+      GCAL.failed = true; GCAL.error = e.message || String(e);
+      console.warn('[familiekalender] kalender', e);
+    }).then(function(){
+      GCAL.busy = null;
+      renderFootNote();
+    });
+    return GCAL.busy;
+  }
+  // Ny dato utenfor det som er hentet (bla i dager/uker): hent det vinduet, men ikke prøv samme vindu oftere enn hvert minutt
+  function ensureCalendarFor(d){
+    if (GCAL.mode !== 'live' || GCAL.busy || inGcalWindow(d)) return;
+    var w = gcalWindow(d);
+    if (GCAL.tried[w.from] && Date.now() - GCAL.tried[w.from] < 60000) return;
+    fetchCalendar(d).then(function(){ render(); });
+  }
+  // «Hvem kjører?»: skrives til beskrivelsen av avtalen i Google («Sjåfør: Magne»)
+  function setDriver(key, who){
+    state.drivers[key] = who;
+    if (GCAL.mode !== 'live') return;
+    var id = key.slice(key.indexOf('|') + 1);
+    pendingDrivers[key] = true;
+    syncStatus('Lagrer i Google Kalender …');
+    apiCall('POST', '/api/kalender', {handling:'sjåfør', id:id, sjåfør: who ? nameOf(who) : ''}).then(function(b){
+      var a = b.avtale;
+      if (a) Object.keys(GCAL.byDay).forEach(function(k){ GCAL.byDay[k].forEach(function(e){ if (e.id === a.id) e.desc = a.beskrivelse || ''; }); });
+      delete pendingDrivers[key]; delete state.drivers[key];
+      syncStatus('');
+      render();
+    }).catch(function(e){
+      delete pendingDrivers[key]; delete state.drivers[key];
+      syncStatus('Kunne ikke lagre sjåfør i Google Kalender. '+(e.message || ''), true);
+      render();
+    });
+  }
+  function renderFootNote(){
+    var el = $('footNote'); if (!el) return;
+    var t;
+    if (GCAL.mode !== 'live') t = 'Avtalene er eksempler til Google Kalender «Family» er koblet til.';
+    else if (GCAL.failed && !GCAL.fetchedAt) t = 'Får ikke hentet avtalene fra Google Kalender: '+GCAL.error;
+    else if (GCAL.failed) t = 'Får ikke kontakt med Google Kalender. Viser avtalene fra kl. '+hhmm(GCAL.fetchedAt)+'.';
+    else if (GCAL.fetchedAt) t = 'Avtaler fra Google Kalender «'+(GCAL.name || 'Family')+'» · oppdatert '+hhmm(GCAL.fetchedAt)+'.';
+    else t = 'Henter avtaler fra Google Kalender …';
+    el.textContent = t+' Været er fra Meteorologisk institutt.';
+    el.classList.toggle('bad', !!(GCAL.mode === 'live' && GCAL.failed));
+  }
+  function eventsRaw(d){
+    var key = iso(d);
+    var base = GCAL.mode === 'live' ? (GCAL.byDay[key] || []) : WEEK[wd(d)].concat(state.demoExtras[key] || []);
+    return base.concat(state.extras[key] || []);
+  }
+  function timeTxt(e){ return e.allDay ? 'Hele dagen' : e.start+(e.end ? '–'+e.end : ''); }
+  function atTxt(e){ return e.allDay ? '' : ' kl. '+e.start; }
   // Middagsplan per dato, fra databasen
   var dinnerEdits = {};
   function saveDinnerEdits(k){
@@ -444,7 +563,18 @@
     });
     return out.slice(0,8);
   }
-  var BDAYS = [];   // kommer fra Google Kalender
+  // Bursdager: heldagsavtaler i «Family» med «bursdag» eller «fyller» i tittelen, de neste 30 dagene
+  function bdayList(){
+    if (GCAL.mode !== 'live') return [];
+    var t = today(), out = [], seen = {};
+    for (var i=0;i<31;i++){
+      var d = addDays(t,i);
+      (GCAL.byDay[iso(d)] || []).forEach(function(e){
+        if (e.allDay && !e.cont && !seen[e.id] && /bursdag|fyller|🎂/i.test(e.title)){ seen[e.id] = true; out.push({title:parseTitle(e.title).title, date:d, inDays:i}); }
+      });
+    }
+    return out.slice(0,4);
+  }
 
   var ICON_CAR = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 16v-5l2-5h10l2 5v5"/><path d="M3 16h18"/><circle cx="7.5" cy="18.5" r="1.5"/><circle cx="16.5" cy="18.5" r="1.5"/></svg>';
   var ICON_WARN = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l9.5 17h-19L12 3z"/><path d="M12 10v4M12 17h.01"/></svg>';
@@ -456,7 +586,7 @@
   var ICON_MISSED = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 16.5h.01"/></svg>';
 
   /* ---------- Tilstand ---------- */
-  var state = { view:'day', cursor:today(), extras:{}, drivers:{}, swaps:{}, done:new Set(), picker:null, confirm:null, stab:'family', editRule:null, editPrep:null, dinnerDays:28, dinnerEdit:null, forceEvening:false, notifList:[], toast:null, me:null, pair:null };
+  var state = { view:'day', cursor:today(), extras:{}, drivers:{}, swaps:{}, done:new Set(), picker:null, confirm:null, stab:'family', editRule:null, editPrep:null, dinnerDays:28, dinnerEdit:null, forceEvening:false, notifList:[], toast:null, me:null, pair:null, demoExtras:{} };
 
   function choresFor(d){
     var day = iso(d);
@@ -533,6 +663,7 @@
     Object.keys(offs).map(Number).forEach(function(n){
       var target = addDays(d, n);
       eventsFor(target).forEach(function(e){
+        if (e.cont) return;   // dag 2 og videre av en avtale over flere dager: forberedt allerede
         e.whos.forEach(function(p){
           var r = bestPrep(e, p);
           if (!r || r.offset !== n) return;
@@ -580,7 +711,7 @@
       });
       if (notif.morning){
         var mine = evts.filter(function(e){ return isFor(e, m.id); });
-        if (mine.length) out.push({who:m.id, time:'07:00', kind:'morning', title:'I dag', body:mine.map(function(e){ return e.start+' '+e.title; }).join(' · '), done:false});
+        if (mine.length) out.push({who:m.id, time:'07:00', kind:'morning', title:'I dag', body:mine.map(function(e){ return (e.allDay ? '' : e.start+' ')+e.title; }).join(' · '), done:false});
       }
     });
     adults.forEach(function(a){
@@ -590,7 +721,7 @@
       });
       if (notif.ride){
         tomorrow.filter(function(e){ return e.needsRide && !e.driverName; }).forEach(function(e){
-          out.push({who:a, time:pn.time, kind:'ride', title:'Ingen kjører ennå', body:evWho(e)+': '+e.title+' i morgen kl. '+e.start, rideKey:e.key, done:false});
+          out.push({who:a, time:pn.time, kind:'ride', title:'Ingen kjører ennå', body:evWho(e)+': '+e.title+' i morgen'+atTxt(e), rideKey:e.key, done:false});
         });
         evts.filter(function(e){ return e.needsRide && !e.driverName && e.startMin >= 120; }).forEach(function(e){
           out.push({who:a, time:hm(e.startMin - 120), kind:'ride', title:'Ingen kjører ennå', body:evWho(e)+': '+e.title+' i dag kl. '+e.start, rideKey:e.key, done:false});
@@ -614,7 +745,7 @@
 
   function eventsFor(d){
     var key = iso(d);
-    var list = WEEK[wd(d)].concat(state.extras[key] || []);
+    var list = eventsRaw(d);
     return list.map(function(e){
       var k = key+'|'+e.id;
       var pt = parseTitle(e.title);
@@ -624,20 +755,22 @@
         driverId = state.drivers[k] && P[state.drivers[k]] ? state.drivers[k] : null;
         driverName = driverId ? nameOf(driverId) : '';
       }
-      var s = toMin(e.start);
+      var all = !!e.allDay;
+      var s = all ? 0 : toMin(e.start);
       return {
         id:e.id, key:k, raw:e.title, title:pt.title, whos:pt.whos, who: pt.whos.length === 1 ? pt.whos[0] : 'many',
-        unknown:pt.unknown || null, byName:!!pt.byName,
-        start:e.start, end:e.end, place:e.place, startMin:s, endMin: e.end ? toMin(e.end) : s+60,
-        needsRide:pd.needsRide, driver:driverId, driverName:driverName, bring:pd.bring, other:pd.other
+        unknown:pt.unknown || null, byName:!!pt.byName, allDay:all, cont:!!e.cont, untilLater:!!e.untilLater, endsAt:e.endsAt || null,
+        start:e.start, end:e.end, place:e.place, startMin:s, endMin: all || e.untilLater ? 1440 : e.end ? toMin(e.end) : s+60,
+        needsRide:pd.needsRide && !all, driver:driverId, driverName:driverName, bring:pd.bring, other:pd.other
       };
-    }).sort(function(a,b){ return a.startMin - b.startMin; });
+    }).sort(function(a,b){ return (b.allDay - a.allDay) || (a.startMin - b.startMin); });
   }
 
   function statusOf(e,d){
     var diff = dayDiff(d);
     if (diff < 0) return 'past';
     if (diff > 0) return 'future';
+    if (e.allDay) return 'future';
     var n = nowMin();
     if (e.endMin <= n) return 'past';
     if (e.startMin <= n) return 'now';
@@ -646,7 +779,7 @@
 
   function issues(d, evts){
     var out = [];
-    var rides = evts.filter(function(e){ return e.needsRide && e.who !== 'all'; });
+    var rides = evts.filter(function(e){ return e.needsRide && e.who !== 'all' && !e.allDay; });
     for (var i=0;i<rides.length;i++){
       for (var j=i+1;j<rides.length;j++){
         var a = rides[i], b = rides[j];
@@ -659,8 +792,8 @@
     var din = dinnerFor(d);
     var tm = toMin(din ? din.time : DEFAULT_TIME);
     choresFor(d).filter(function(c){ return c.rule.dinner; }).forEach(function(c){
-      evts.filter(function(e){ return isFor(e, c.who) && e.startMin < tm+30 && e.endMin > tm-75; }).forEach(function(e){
-        out.push(nameOf(c.who)+' har middagsansvar, men står oppført med «'+e.title+'» '+e.start+(e.end ? '–'+e.end : '')+'. Trykk «Bytt» på middagsoppgaven for å gi den til noen andre denne dagen.');
+      evts.filter(function(e){ return !e.allDay && isFor(e, c.who) && e.startMin < tm+30 && e.endMin > tm-75; }).forEach(function(e){
+        out.push(nameOf(c.who)+' har middagsansvar, men står oppført med «'+e.title+'» '+timeTxt(e)+'. Trykk «Bytt» på middagsoppgaven for å gi den til noen andre denne dagen.');
       });
     });
     return out;
@@ -670,7 +803,7 @@
   function seedDemoEvents(){
     var t = today();
     var thu = addDays(t, ((3 - wd(t) + 7) % 7) || 7);
-    state.extras[iso(thu)] = [{id:'x-klassetur', title:'OL - Klassetur til Ringve museum', start:'08:30', end:'14:30', place:'Skolen', desc:'Husk: matpakke, drikkeflaske, regntøy'}];
+    state.demoExtras[iso(thu)] = [{id:'x-klassetur', title:'OL - Klassetur til Ringve museum', start:'08:30', end:'14:30', place:'Skolen', desc:'Husk: matpakke, drikkeflaske, regntøy'}];
   }
 
   /* ---------- Tegning: dag ---------- */
@@ -678,7 +811,9 @@
     var st = statusOf(e,d);
     var others = laneId && e.who !== 'all' && e.whos.length > 1 ? e.whos.filter(function(x){ return x !== laneId; }) : [];
     if (laneId && e.who === 'all') others = null;   // vises som «Hele familien» i Min dag
-    var time = '<div class="time"><span class="t-start">'+e.start+'</span>'+(e.end ? '<span class="t-end">'+e.end+'</span>' : '')+'</div>';
+    var time = e.allDay
+      ? '<div class="time allday"><span class="t-start">Hele</span><span class="t-end">'+(e.endsAt ? 'til '+e.endsAt : 'dagen')+'</span></div>'
+      : '<div class="time"><span class="t-start">'+e.start+'</span>'+(e.end ? '<span class="t-end">'+e.end+'</span>' : e.untilLater ? '<span class="t-end">→</span>' : '')+'</div>';
     var ride = '';
     if (e.needsRide){
       var dr = drivers();
@@ -737,9 +872,10 @@
     var sub;
     if (isToday(d)){
       var n = nowMin();
-      var cur = evts.find(function(e){ return e.startMin <= n && n < e.endMin; });
-      var nxt = evts.find(function(e){ return e.startMin > n; });
-      sub = cur ? 'Nå: '+cur.title : nxt ? 'Neste: '+nxt.title+' '+rel(nxt.startMin - n) : (evts.length ? 'Ferdig for i dag' : 'Ingen avtaler i dag');
+      var timed = evts.filter(function(e){ return !e.allDay; });
+      var cur = timed.find(function(e){ return e.startMin <= n && n < e.endMin; });
+      var nxt = timed.find(function(e){ return e.startMin > n; });
+      sub = cur ? 'Nå: '+cur.title : nxt ? 'Neste: '+nxt.title+' '+rel(nxt.startMin - n) : (timed.length ? 'Ferdig for i dag' : evts.length ? evts[0].title : 'Ingen avtaler i dag');
     } else {
       sub = evts.length ? evts.length+' '+(evts.length === 1 ? 'avtale' : 'avtaler') : 'Ingen avtaler';
     }
@@ -771,16 +907,17 @@
     var sub;
     if (isToday(d)){
       var n = nowMin();
-      var cur = evts.find(function(e){ return e.startMin <= n && n < e.endMin; });
-      var nxt = evts.find(function(e){ return e.startMin > n; });
-      sub = cur ? 'Nå: '+cur.title : nxt ? 'Neste: '+nxt.title+' '+rel(nxt.startMin - n) : (evts.length ? 'Ferdig med avtalene for i dag' : 'Ingen avtaler i dag');
+      var timed = evts.filter(function(e){ return !e.allDay; });
+      var cur = timed.find(function(e){ return e.startMin <= n && n < e.endMin; });
+      var nxt = timed.find(function(e){ return e.startMin > n; });
+      sub = cur ? 'Nå: '+cur.title : nxt ? 'Neste: '+nxt.title+' '+rel(nxt.startMin - n) : (timed.length ? 'Ferdig med avtalene for i dag' : evts.length ? evts[0].title : 'Ingen avtaler i dag');
     } else sub = evts.length ? evts.length+' '+(evts.length === 1 ? 'avtale' : 'avtaler') : 'Ingen avtaler';
     var dinner = din
       ? '<div class="me-row"><span class="t">'+din.time+'</span><span>'+esc(din.dish)+
           (cooks.indexOf(id) > -1 ? ' · <b>du lager middag</b>' : cooks.length ? ' <small>· '+esc(names(cooks))+' lager</small>' : '')+'</span></div>'
       : '<p class="empty">Ikke bestemt ennå</p>';
     var tm = tomorrow.length ? tomorrow.map(function(e){
-      return '<div class="me-row"><span class="t">'+e.start+'</span><span>'+esc(e.title)+(e.who === 'all' ? ' <small>· hele familien</small>' : '')+
+      return '<div class="me-row"><span class="t">'+(e.allDay ? 'Hele dagen' : e.start)+'</span><span>'+esc(e.title)+(e.who === 'all' ? ' <small>· hele familien</small>' : '')+
         (e.bring.length ? ' <small>· husk '+esc(e.bring.join(', '))+'</small>' : '')+'</span></div>';
     }).join('') : '<p class="empty">Ingen avtaler</p>';
     $('me').style.setProperty('--c', 'var(--pal-'+m.color+')');
@@ -810,7 +947,7 @@
     var dots = '<span class="fam-dots" aria-hidden="true">'+members.map(function(m){ return '<i style="background:var(--pal-'+m.color+')"></i>'; }).join('')+'</span>';
     famEl.innerHTML = fam.map(function(e){
       return '<div class="fam-item">'+dots+
-        '<span class="fam-label">Hele familien</span><span class="t">'+e.start+(e.end ? '–'+e.end : '')+'</span>'+
+        '<span class="fam-label">Hele familien</span><span class="t">'+timeTxt(e)+'</span>'+
         '<span class="ti">'+esc(e.title)+'</span>'+(e.place ? '<span class="muted">'+esc(e.place)+'</span>' : '')+
         (e.bring && e.bring.length ? '<span class="muted">Husk: '+e.bring.map(esc).join(', ')+'</span>' : '')+
         (e.unknown ? '<span class="fam-unknown">Ukjent kode «'+esc(e.unknown.join('+'))+'»</span>' : '')+'</div>';
@@ -849,7 +986,7 @@
       var d = addDays(mon,i);
       var items = eventsFor(d).map(function(e){
         var warn = e.needsRide && !e.driverName ? '<span class="dc-warn" title="Mangler sjåfør">?</span>' : '';
-        return '<li class="dc-item"><span class="dot" style="background:'+evColor(e)+'"></span><span><span class="t">'+e.start+'</span> '+esc(e.title)+warn+'<span class="dc-who">'+esc(evWho(e))+'</span></span></li>';
+        return '<li class="dc-item"><span class="dot" style="background:'+evColor(e)+'"></span><span><span class="t">'+(e.allDay ? 'Hele dagen' : e.start)+'</span> '+esc(e.title)+warn+'<span class="dc-who">'+esc(evWho(e))+'</span></span></li>';
       }).join('');
       var cooks = cooksFor(d);
       var din = dinnerFor(d);
@@ -937,13 +1074,13 @@
       '<div class="dinner-meta">'+(cooks.length ? esc(names(cooks))+' lager' : 'Ingen har middagsansvar')+(din ? ' · kl. '+din.time : '')+'</div>';
 
     var t = today();
-    $('bdayTile').innerHTML = '<h3 class="label">Bursdager</h3>'+(BDAYS.length ? '<ul class="bd">'+BDAYS.map(function(b){
-      var bd = addDays(t, b.inDays);
-      return '<li><span>'+esc(b.name)+' fyller '+b.age+'</span><span class="in">'+dateShort(bd)+' · om '+b.inDays+' d</span></li>';
-    }).join('')+'</ul>' : '<div class="muted">Kommer når Google Kalender «Family» er koblet til</div>');
+    var bds = bdayList();
+    $('bdayTile').innerHTML = '<h3 class="label">Bursdager</h3>'+(bds.length ? '<ul class="bd">'+bds.map(function(b){
+      return '<li><span>'+esc(b.title)+'</span><span class="in">'+(b.inDays === 0 ? 'i dag' : b.inDays === 1 ? 'i morgen' : dateShort(b.date)+' · om '+b.inDays+' d')+'</span></li>';
+    }).join('')+'</ul>' : '<div class="muted">'+(GCAL.mode === 'live' ? 'Ingen de neste 30 dagene' : 'Kommer når Google Kalender «Family» er koblet til')+'</div>');
 
     var packs = [];
-    eventsFor(sd).forEach(function(e){ (e.bring || []).forEach(function(item){ packs.push({item:item, e:e}); }); });
+    eventsFor(sd).forEach(function(e){ if (!e.cont) (e.bring || []).forEach(function(item){ packs.push({item:item, e:e}); }); });
     $('packTile').innerHTML = '<h3 class="label">Pakkeliste '+label+'</h3>'+
       (packs.length ? '<div class="packs">'+packs.map(function(p){
         return '<span class="pack"><i style="background:'+evColor(p.e)+'"></i>'+esc(cap(p.item))+' <small>'+esc(evWho(p.e))+'</small></span>';
@@ -951,6 +1088,7 @@
   }
 
   function render(){
+    ensureCalendarFor(state.cursor);
     renderHeader();
     $('dayView').hidden = state.view !== 'day';
     $('meView').hidden = state.view !== 'me';
@@ -989,7 +1127,9 @@
     var kid2 = members.filter(function(m){ return m.kid && m.id !== kid.id; })[0];
     var adult = drivers()[0];
     return '<div class="gcal-info"><h3 class="label">Google Kalender</h3>'+
-      '<p>Avtaler hentes fra «familie»-kalenderen. Start tittelen med koden til personen, for eksempel <b>«'+esc(writeCode(kid.id))+' - Håndball»</b>'+
+      '<p>'+(GCAL.mode === 'live' ? 'Avtalene hentes fra Google Kalender «'+esc(GCAL.name || 'Family')+'» hvert 2. minutt. Valg av sjåfør skrives tilbake til avtalen.' :
+        'Google Kalender «Family» er ikke koblet til ennå. Til da vises eksempelavtaler.')+'</p>'+
+      '<p>Start tittelen med koden til personen, for eksempel <b>«'+esc(writeCode(kid.id))+' - Håndball»</b>'+
       (kid2 ? '. Flere personer: <b>«'+esc(writeCode(kid.id))+'+'+esc(writeCode(kid2.id))+' - Tannlege»</b>' : '')+
       '. Store eller små bokstaver spiller ingen rolle. Uten kode havner avtalen hos hele familien, med mindre et navn står i tittelen.</p>'+
       '<p>Sjåfør og pakkeliste står i beskrivelsen: <b>Sjåfør: '+esc(adult ? nameOf(adult) : 'Magne')+'</b> og <b>Husk: drakt, innesko</b>. «Sjåfør: ?» betyr at noen må kjøre.</p></div>';
@@ -1655,7 +1795,7 @@
     var dr = drivers();
     return {
       role:'bot',
-      text:'Lagt inn i Google Kalender («familie»): «'+title+'» '+when+', 12:00–13:30 i hallen. Den vises nå også på mobilene deres.\n\nBeskrivelse:\n'+buildDesc([], '', true, bring)+(dr.length ? '\n\nHvem kjører?' : ''),
+      text:'(Demo, ikke lagt inn i Google ennå.) Slik blir det i «Family»: «'+title+'» '+when+', 12:00–13:30 i hallen. Den vises nå også på mobilene deres.\n\nBeskrivelse:\n'+buildDesc([], '', true, bring)+(dr.length ? '\n\nHvem kjører?' : ''),
       actions: dr.length ? dr.map(function(x){
         return {label:nameOf(x), fn:function(){
           state.drivers[key] = x;
@@ -1670,7 +1810,7 @@
     var t = addDays(today(), 1);
     var lines = eventsFor(t).map(function(e){
       var r = e.needsRide ? (e.driverName ? ' ('+e.driverName+' kjører)' : ' (mangler sjåfør)') : '';
-      return '• '+e.start+' '+evWho(e)+': '+e.title+r;
+      return '• '+(e.allDay ? 'Hele dagen' : e.start)+' '+evWho(e)+': '+e.title+r;
     });
     var cooks = cooksFor(t);
     var din = dinnerFor(t);
@@ -1773,7 +1913,7 @@
       closeDrawers(true); render();
       var mv = $('meView'); if (mv) mv.scrollTop = 0;
     }
-    else if (act === 'setdriver'){ state.drivers[b.dataset.key] = b.dataset.who; state.picker = null; render(); }
+    else if (act === 'setdriver'){ setDriver(b.dataset.key, b.dataset.who); state.picker = null; render(); }
     else if (act === 'pickswap'){
       state.picker = state.picker === 'swap:'+b.dataset.key ? null : 'swap:'+b.dataset.key; renderMain();
       var again = document.querySelector('.swapbtn[data-key="'+b.dataset.key+'"]'); if (again) again.focus();
@@ -1873,7 +2013,7 @@
       }
     }
     else if (act === 'nt-done' && state.toast){ setDone(state.toast.key, true); hideToast(); render(); refreshNotifPreview(); }
-    else if (act === 'nt-ride' && state.toast){ state.drivers[state.toast.rideKey] = state.toast.who; hideToast(); render(); refreshNotifPreview(); }
+    else if (act === 'nt-ride' && state.toast){ setDriver(state.toast.rideKey, state.toast.who); hideToast(); render(); refreshNotifPreview(); }
     else if (act === 'p-edit'){ state.editPrep = state.editPrep === id ? null : id; state.confirm = null; renderSettings(); refocus(sel); }
     else if (act === 'p-close'){ state.editPrep = null; state.confirm = null; renderSettings(); refocus('[data-act="p-edit"][data-id="'+id+'"]'); }
     else if (act === 'p-who' && prepById(id)){
@@ -2323,7 +2463,8 @@
     if (DB.channel){ try { sb.removeChannel(DB.channel); } catch(e){} }
     DB.household = DB.role = DB.myMember = DB.label = null; DB.channel = null; DB.devices = null;
     members = []; syncMembers(); rules = []; preps.rules = []; dinnerEdits = {};
-    state.done = new Set(); state.swaps = {}; state.pair = null; state.view = 'day'; state.me = null;
+    state.done = new Set(); state.swaps = {}; state.pair = null; state.view = 'day'; state.me = null; state.drivers = {};
+    GCAL.mode = 'demo'; GCAL.byDay = {}; GCAL.windows = {}; GCAL.fetchedAt = null; GCAL.failed = false; GCAL.tried = {};
   }
 
   /* ---------- Oppstart ---------- */
@@ -2387,6 +2528,8 @@
       if (!row){ booting = false; gate('pair'); return; }
       DB.household = row.household_id; DB.role = row.role; DB.myMember = row.member_id; DB.label = row.device_label;
       return loadAll().then(function(){
+        return Promise.race([fetchCalendar(), new Promise(function(r){ setTimeout(r, 5000); })]);
+      }).then(function(){
         booting = false;
         retriedAuth = false;
         begin();
@@ -2413,6 +2556,12 @@
     setInterval(tick, 10000);
     setInterval(fetchTransit, TRANSIT.refreshSec*1000);
     setInterval(refreshAll, 10*60000);   // sikkerhetsnett i tillegg til sanntid
+    setInterval(function(){
+      if (!DB.household) return;
+      fetchCalendar().then(function(){   // i dag, og datoen som vises hvis den er et annet sted
+        return inGcalWindow(state.cursor) && gcalWindow(state.cursor).from === gcalWindow(today()).from ? null : fetchCalendar(state.cursor);
+      }).then(render);
+    }, GCAL_REFRESH);
     document.addEventListener('visibilitychange', function(){
       if (document.visibilityState !== 'visible') return;
       fetchTransit();
@@ -2424,7 +2573,7 @@
     if (!DB.household || booting) return;
     q(sb.from('household_users').select('household_id').eq('user_id', DB.uid).maybeSingle()).then(function(row){
       if (!row){ resetSession(); closeDrawers(true); boot(); return; }
-      return loadAll().then(function(){ syncStatus(''); afterRemoteChange(); });
+      return loadAll().then(function(){ syncStatus(''); afterRemoteChange(); return fetchCalendar(); }).then(render);
     }).catch(function(e){
       console.warn('[familiekalender] oppdatering', e);
       syncStatus('Får ikke kontakt. Viser det som ble hentet sist.', true);
