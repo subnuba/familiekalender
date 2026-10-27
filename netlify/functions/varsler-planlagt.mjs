@@ -1,4 +1,4 @@
-// Sender varsler som har forfalt. Kjøres av Netlify hvert 10. minutt.
+// Sender varsler som har forfalt. Kjøres av Netlify hvert 15. minutt (06–23).
 // Regner ut med appens egen kode (netlify/lib/kjerne.mjs), så det som sendes er det samme som vises
 // under Innstillinger → Varsler → «Varsler i dag». push_log hindrer at noe sendes to ganger.
 import { admin, serverKey } from '../lib/supabase.mjs';
@@ -6,7 +6,8 @@ import { serviceAccount, hentAvtaler } from '../lib/google.mjs';
 import { lastKjerne } from '../lib/kjerne.mjs';
 import { serverSecrets, signer, send } from '../lib/push.mjs';
 
-export const config = { schedule: '*/10 * * * *' };
+// Hvert 15. minutt, og ingenting om natta: gratisplanen på Netlify har en fast kvote for kjøretid.
+export const config = { schedule: '*/15 * * * *' };
 const VINDU = 30;            // minutter: tar igjen et varsel hvis en kjøring ble hoppet over
 const GJORT = ['prep', 'chore', 'dinner', 'escalate'];
 
@@ -63,6 +64,7 @@ export default async function handler(){
   if (!serverKey()){ console.warn('[varsler] SUPABASE_SERVICE_KEY mangler'); return; }
   process.env.TZ = 'Europe/Oslo';
   const nå = new Date();
+  if (nå.getHours() < 6 || nå.getHours() >= 23) return;   // ingen varsler om natta (seneste er 22:00, morgenoversikten 07:00)
   const familier = await admin('households?select=id');
   for (const f of familier){
     try { console.log('[varsler]', f.id, JSON.stringify(await kjørFamilie(f.id, nå))); }

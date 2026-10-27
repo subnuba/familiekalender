@@ -471,7 +471,13 @@
   // Hentes via Netlify-funksjonen /api/kalender (tjenestekonto som kalenderen er delt med).
   // Til kalenderen er koblet til (gcal_calendar_id i innstillingene), vises ukemalen over som eksempler.
   var GCAL = {mode:'demo', byDay:{}, windows:{}, fetchedAt:null, failed:false, error:'', name:'', busy:null, tried:{}};
-  var GCAL_REFRESH = 2*60000;
+  // Hver henting koster litt på Netlify (gratisplanen har en fast kvote): hvert 5. minutt om dagen, hver halvtime om natta.
+  // Når noen endrer noe i appen, eller skjermen våkner, hentes det uansett med en gang.
+  var GCAL_REFRESH = 5*60000, GCAL_NIGHT = 30*60000;
+  function gcalDue(){
+    var h = new Date().getHours(), night = h >= 23 || h < 6;
+    return !GCAL.fetchedAt || Date.now() - GCAL.fetchedAt >= (night ? GCAL_NIGHT : GCAL_REFRESH) - 5000;
+  }
   function gcalConfigured(){ return !!(DB.settings && DB.settings.gcal_calendar_id); }
   function addEv(byDay, k, ev){ (byDay[k] = byDay[k] || []).push(ev); }
   // Fra Google-avtaler til appens format per dato. Heldags og avtaler over flere dager vises hver dag.
@@ -2850,11 +2856,11 @@
     setInterval(fetchTransit, TRANSIT.refreshSec*1000);
     setInterval(refreshAll, 10*60000);   // sikkerhetsnett i tillegg til sanntid
     setInterval(function(){
-      if (!DB.household) return;
+      if (!DB.household || !gcalDue()) return;
       fetchCalendar().then(function(){   // i dag, og datoen som vises hvis den er et annet sted
         return inGcalWindow(state.cursor) && gcalWindow(state.cursor).from === gcalWindow(today()).from ? null : fetchCalendar(state.cursor);
       }).then(render);
-    }, GCAL_REFRESH);
+    }, 60000);
     document.addEventListener('visibilitychange', function(){
       if (document.visibilityState !== 'visible') return;
       fetchTransit();
