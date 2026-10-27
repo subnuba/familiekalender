@@ -278,6 +278,7 @@
   }
   function writeCode(id){ var m = P[id]; return m ? (normCode(m.code) || defaultCode(m.name) || '?') : '?'; }
   var PREFIX_RE = /^\s*([A-Za-zÆØÅæøå0-9]{1,4}(?:\s*[+\/&,]\s*[A-Za-zÆØÅæøå0-9]{1,4})*)\s*[-–—:]\s*(\S.*)$/;
+  var SPACE_PREFIX_RE = /^\s*([A-Za-zÆØÅæøå0-9]{1,4}(?:\s*[+\/&]\s*[A-Za-zÆØÅæøå0-9]{1,4})*)\s+(\S.*)$/;
   function parseTitle(t){
     t = String(t || '');
     var map = codeMap(), m = PREFIX_RE.exec(t);
@@ -290,6 +291,13 @@
       if (!unknown.length) return {whos:ids, title:m[2].trim()};
       // Ser ut som en kode (store bokstaver), men ingen i familien har den
       if (raw.every(function(c){ return c.length <= 3 && c === c.toUpperCase() && /[A-ZÆØÅ]/.test(c); })) return {whos:['all'], title:m[2].trim(), unknown:unknown};
+    }
+    // Kode uten bindestrek, slik familien ofte skriver: «OL Fotball», «Ol Tilsynsvakt», «AM+OL Tannlege».
+    // Gjelder bare når første ord er en kode noen i familien har.
+    var sp = SPACE_PREFIX_RE.exec(t);
+    if (sp){
+      var parts = sp[1].split(/\s*[+\/&]\s*/), sids = [];
+      if (parts.every(function(c){ var hit = map[normCode(c)]; if (hit && sids.indexOf(hit[0]) < 0) sids.push(hit[0]); return !!hit; })) return {whos:sids, title:sp[2].trim()};
     }
     // Uten kode: let etter navn i tittelen («Håndballkamp for Oliver», slik Gemini ofte skriver)
     var byName = members.filter(function(mm){
