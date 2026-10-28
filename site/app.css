@@ -5,6 +5,7 @@
   --pal-blue:#2C6AAE; --pal-red:#AE3857; --pal-green:#2A8354; --pal-amber:#B06C0B; --pal-purple:#6B4BB0; --pal-teal:#137C82;
   --pal-pink:#B4407F; --pal-olive:#6B7A1E; --pal-brown:#8A5A3C; --pal-slate:#4D6070; --pal-coral:#C2502F; --pal-navy:#26408F;
   --bus:#0F6E63; --rail:#8A2C3C; --live:#1F8F4E; --bad:#B3261E;
+  --tram:#6A3F94; --metro:#A8461A; --water:#1D5C9A;
   --shadow:0 1px 2px rgb(21 33 42 / .08); --shadow-lg:0 12px 40px rgb(21 33 42 / .18); --scrim:rgb(21 33 42 / .28);
   --f-display:"Bricolage Grotesque","Segoe UI",Roboto,system-ui,sans-serif;
   --f-body:"Schibsted Grotesk","Segoe UI",Roboto,system-ui,sans-serif;
@@ -17,6 +18,7 @@
     --pal-blue:#7DAEE4; --pal-red:#E68BA3; --pal-green:#72C496; --pal-amber:#E2AC58; --pal-purple:#B49BEA; --pal-teal:#5CC4C8;
     --pal-pink:#EB94C4; --pal-olive:#B9C766; --pal-brown:#D1A27F; --pal-slate:#9DB0BF; --pal-coral:#F09A7E; --pal-navy:#8FA6EE;
     --bus:#3CC0AE; --rail:#E0788A; --live:#4CD38A; --bad:#FF8A80;
+    --tram:#C3A0EC; --metro:#F0A06E; --water:#80B6EE;
     --shadow:0 1px 2px rgb(0 0 0 / .4); --shadow-lg:0 12px 40px rgb(0 0 0 / .55); --scrim:rgb(0 0 0 / .5);
     color-scheme:dark;
   }
@@ -27,6 +29,7 @@
   --pal-blue:#7DAEE4; --pal-red:#E68BA3; --pal-green:#72C496; --pal-amber:#E2AC58; --pal-purple:#B49BEA; --pal-teal:#5CC4C8;
   --pal-pink:#EB94C4; --pal-olive:#B9C766; --pal-brown:#D1A27F; --pal-slate:#9DB0BF; --pal-coral:#F09A7E; --pal-navy:#8FA6EE;
   --bus:#3CC0AE; --rail:#E0788A; --live:#4CD38A; --bad:#FF8A80;
+  --tram:#C3A0EC; --metro:#F0A06E; --water:#80B6EE;
   --shadow:0 1px 2px rgb(0 0 0 / .4); --shadow-lg:0 12px 40px rgb(0 0 0 / .55); --scrim:rgb(0 0 0 / .5);
   color-scheme:dark;
 }
@@ -62,6 +65,9 @@ svg{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-lin
 .trow{display:flex;align-items:center;gap:7px;min-height:22px;white-space:nowrap;font-variant-numeric:tabular-nums}
 .tbadge{flex:none;display:inline-grid;place-items:center;min-width:32px;height:22px;padding:0 6px;border-radius:6px;background:var(--bus);color:var(--surface);font-weight:800;font-size:12.5px}
 .tbadge.rail{background:var(--rail);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase}
+.tbadge.tram{background:var(--tram)}
+.tbadge.metro{background:var(--metro)}
+.tbadge.water{background:var(--water)}
 .tlive{flex:none;width:7px;height:7px;border-radius:50%;background:var(--live)}
 .tmin{font-weight:700;font-size:16px}
 .tclock{font-weight:600;font-size:14px}
@@ -168,7 +174,9 @@ svg{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-lin
 .nt-actions{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
 .nt-actions button{min-height:40px;padding:0 12px;border:0;border-radius:8px;background:transparent;color:var(--accent);font-weight:700;cursor:pointer}
 .pvl{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px;font-size:13.5px;overflow-wrap:anywhere}
-.drawer-tabs .seg{max-width:100%;overflow-x:auto}
+.drawer-tabs .seg{position:relative;max-width:100%;overflow-x:auto;scrollbar-width:none}
+.drawer-tabs .seg::-webkit-scrollbar{display:none}
+.drawer-tabs .seg button{flex:none;min-width:0;padding:0 12px}
 .fam-dots{display:flex}
 .fam-dots i{width:16px;height:16px;border-radius:50%;border:2px solid var(--surface);margin-left:-5px}
 .fam-dots i:first-child{margin-left:0}
@@ -501,3 +509,22 @@ svg{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-lin
 .pushcard p{margin:0}
 .pushcard .btn{align-self:flex-start}
 .ctime{font-variant-numeric:tabular-nums;font-weight:700;color:var(--c, var(--accent));margin-right:2px}
+
+/* Innstillinger → Sted: været og strekninger for avganger */
+.placenow{margin:0;font-size:14px;line-height:1.45}
+.georesults{display:flex;flex-direction:column;gap:4px}
+.georesults:empty{display:none}
+.georesults .hint{margin:0}
+.hint.warn{color:var(--warn);font-weight:600}
+.georow{display:flex;flex-direction:column;align-items:flex-start;gap:1px;width:100%;min-height:48px;padding:7px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--ink);font:inherit;text-align:left;cursor:pointer}
+.georow:hover{background:var(--surface-2)}
+.georow b{font-weight:700;font-size:15px;overflow-wrap:anywhere}
+.georow small{font-size:12.5px;color:var(--muted)}
+.route-sum{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.route-sum b{font-size:15.5px;line-height:1.25;overflow-wrap:anywhere}
+.route-sum small{font-size:13px;color:var(--muted)}
+.route-stops{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;align-items:start}
+.route-lines{display:flex;flex-direction:column;gap:6px}
+.route-lines .hint{font-size:12.5px}
+.badge-hint{margin:0;align-self:end;padding-bottom:4px;font-size:12.5px}
+@media (max-width: 560px){ .route-stops{grid-template-columns:minmax(0,1fr)} }
