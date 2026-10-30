@@ -248,8 +248,9 @@
   // «Hvem gjelder dette?» (trykk på en avtale): bare denne forekomsten eller alle med samme tittel
   var OWNERS = {event:{}, title:{}};
   function titleKey(t){ return String(t || '').trim().toLowerCase().replace(/\s+/g, ' '); }
-  function ownerFor(id, title){
+  function ownerFor(id, title, alt){
     if (OWNERS.event[id] !== undefined) return {scope:'event', who:OWNERS.event[id]};
+    for (var i=0; alt && i<alt.length; i++) if (OWNERS.event[alt[i]] !== undefined) return {scope:'event', who:OWNERS.event[alt[i]]};
     var tk = titleKey(title);
     if (tk && OWNERS.title[tk] !== undefined) return {scope:'title', who:OWNERS.title[tk]};
     return null;
@@ -487,9 +488,12 @@
   function addEv(byDay, k, ev){ (byDay[k] = byDay[k] || []).push(ev); }
   // Fra Google-avtaler til appens format per dato. Heldags og avtaler over flere dager vises hver dag.
   function spreadEvents(list){
-    var byDay = {};
+    var byDay = {}, seen = {};
     list.forEach(function(a){
-      var base = {id:a.id, title:a.tittel, place:a.sted || '', desc:a.beskrivelse || '', recurring:!!a.gjentas, kilde:a.kilde || ''};
+      var dup = titleKey(a.tittel)+'|'+a.start+'|'+a.slutt+'|'+(a.heleDagen ? 1 : 0);
+      if (seen[dup]){ seen[dup].push(a.id); return; }   // vises én gang; skyss og eier følger med fra begge
+      seen[dup] = [];
+      var base = {id:a.id, title:a.tittel, place:a.sted || '', desc:a.beskrivelse || '', recurring:!!a.gjentas, kilde:a.kilde || '', alt:seen[dup]};
       if (a.heleDagen){
         var d = fromIso(a.start.slice(0,10)), end = fromIso((a.slutt || a.start).slice(0,10));   // sluttdato er dagen etter
         if (end <= d) end = addDays(d, 1);
@@ -799,8 +803,9 @@
       }
       if (notif.drive) evts.filter(function(e){ return e.driver === a && !e.allDay && e.startMin >= 45; }).forEach(function(e){
         var kids = e.whos.filter(function(x){ return x !== a && P[x]; });
+        var dk = 'drive|'+e.key+'|'+a;
         out.push({who:a, time:hm(e.startMin - 45), kind:'drive', title:'Du kjører kl. '+e.start,
-          body:(kids.length ? names(kids)+' til ' : '')+e.title+(e.place ? ' · '+e.place : ''), rideKey:e.key, done:false});
+          body:(kids.length ? names(kids)+' til ' : '')+e.title+(e.place ? ' · '+e.place : ''), rideKey:e.key, key:dk, done:state.done.has(dk)});
       });
       if (notif.escalate) dayPreps.filter(function(t){ return t.who !== 'all' && P[t.who] && P[t.who].kid; }).forEach(function(t){
         out.push({who:a, time:hm(toMin(personNotif(t.who).time) + 60), kind:'escalate', title:nameOf(t.who)+' har ikke krysset av', body:prepTitle(t)+' '+prepSub(t), key:t.key, done:t.done});
@@ -810,9 +815,23 @@
     return out.sort(function(x,y){ return x.time < y.time ? -1 : x.time > y.time ? 1 : order.indexOf(x.who) - order.indexOf(y.who); });
   }
 
-  function prepTitle(t){ return t.rule.title.trim() || 'Forberede'; }
+  // Den som er satt som sjåfør, får «Kjøre Oliver» som oppgave samme dag (kan krysses av)
+  function driveTasksFor(d){
+    return eventsFor(d).filter(function(e){ return e.driver && P[e.driver] && !e.allDay; }).map(function(e){
+      var key = 'drive|'+e.key+'|'+e.driver;
+      return {kind:'drive', key:key, who:e.driver, event:e, date:d, target:d, time:e.start, done:state.done.has(key)};
+    });
+  }
+  function prepTitle(t){
+    if (t.kind === 'drive'){
+      var others = t.event.whos.filter(function(x){ return x !== t.who && P[x]; });
+      return 'Kjøre'+(others.length ? ' '+names(others) : '');
+    }
+    return t.rule.title.trim() || 'Forberede';
+  }
   function prepSub(t){
     var e = t.event;
+    if (t.kind === 'drive') return 'til '+e.title+' kl. '+e.start+(e.place ? ' · '+e.place : '');
     var s = 'til '+e.title+' '+whenRel(t.target, t.date)+(e.start ? ' kl. '+e.start : '');
     if (t.rule.pack && e.bring && e.bring.length) s += ' · Husk: '+e.bring.join(', ');
     return s;
@@ -824,17 +843,18 @@
     return list.map(function(e){
       var k = key+'|'+e.id;
       var pt = parseTitle(e.title, e.kilde);
-      var ov = ownerFor(e.id, e.title);
+      var ov = ownerFor(e.id, e.title, e.alt);
       if (ov){
         var ow = ov.who === 'all' ? ['all'] : (Array.isArray(ov.who) ? ov.who.filter(function(id){ return P[id]; }) : []);
         if (ow.length) pt = {whos:ow, title:pt.title, owned:ov.scope};
       }
       var pd = parseDesc(e.desc);
       var driverId = pd.driverId, driverName = pd.driverName, needsRide = pd.needsRide;
-      if (RIDES[e.id] !== undefined){
+      var rideId = [e.id].concat(e.alt || []).filter(function(x){ return RIDES[x] !== undefined; })[0];
+      if (rideId){
         needsRide = true;
-        driverId = memberFromText(RIDES[e.id]);
-        driverName = driverId ? nameOf(driverId) : RIDES[e.id];
+        driverId = memberFromText(RIDES[rideId]);
+        driverName = driverId ? nameOf(driverId) : RIDES[rideId];
       }
       if (state.drivers[k] !== undefined){
         driverId = state.drivers[k] && P[state.drivers[k]] ? state.drivers[k] : null;
@@ -993,9 +1013,15 @@
 
   function prepRowHTML(t){
     var id = 'pr-'+t.key.replace(/[^a-z0-9]/gi,'-');
-    return '<div class="chore prep'+(t.done?' done':'')+'">'+
+    return '<div class="chore prep'+(t.kind === 'drive' ? ' drive' : '')+(t.done?' done':'')+'">'+
       '<label class="chore-l" for="'+id+'"><input type="checkbox" id="'+id+'" data-act="chore" data-key="'+esc(t.key)+'"'+(t.done?' checked':'')+'>'+
-      '<span class="ct"><span>'+esc(prepTitle(t))+'</span><small>'+esc(prepSub(t))+'</small></span></label></div>';
+      '<span class="ct"><span>'+(t.kind === 'drive' ? '<b class="ctime">'+t.time+'</b> ' : '')+esc(prepTitle(t))+'</span><small>'+esc(prepSub(t))+'</small></span></label></div>';
+  }
+  // Rekkefølge i oppgavelista: kjøring (har klokkeslett) først, så faste oppgaver, så forberedelser
+  function taskRowsHTML(chores, prepList){
+    var drives = prepList.filter(function(t){ return t.kind === 'drive'; }).sort(function(a,b){ return a.time.localeCompare(b.time); });
+    var preps = prepList.filter(function(t){ return t.kind !== 'drive'; });
+    return drives.map(prepRowHTML).join('')+chores.map(choreRowHTML).join('')+preps.map(prepRowHTML).join('');
   }
 
   function laneHTML(m, evts, chores, d, prepList){
@@ -1020,7 +1046,7 @@
       '<div class="lane-body">'+
         (evts.length ? '<ol class="events">'+evts.map(function(e){ return eventHTML(e,d,m.id); }).join('')+'</ol>'
                      : '<p class="empty">Ingen avtaler '+(isToday(d) ? 'i dag' : 'denne dagen')+'</p>')+
-        (all.length ? '<div class="chores"><h3 class="label">Oppgaver</h3>'+chores.map(choreRowHTML).join('')+prepList.map(prepRowHTML).join('')+'</div>' : '')+
+        (all.length ? '<div class="chores"><h3 class="label">Oppgaver</h3>'+taskRowsHTML(chores, prepList)+'</div>' : '')+
       '</div></section>';
   }
 
@@ -1030,7 +1056,8 @@
     if (!m){ state.view = 'day'; return renderDay(); }
     var evts = eventsFor(d).filter(function(e){ return isFor(e, id) || e.who === 'all'; });
     var chores = choresFor(d).filter(function(c){ return c.who === id; });
-    var dayPreps = prepTasksFor(d).filter(function(t){ return t.who === id || (!m.kid && t.who === 'all'); });
+    var dayPreps = prepTasksFor(d).filter(function(t){ return t.who === id || (!m.kid && t.who === 'all'); })
+      .concat(driveTasksFor(d).filter(function(t){ return t.who === id; }));
     var tasks = chores.length + dayPreps.length;
     var doneN = chores.concat(dayPreps).filter(function(c){ return c.done; }).length;
     var tomorrow = eventsFor(addDays(d,1)).filter(function(e){ return isFor(e, id) || e.who === 'all'; });
@@ -1057,7 +1084,7 @@
         '<div class="who"><h2>'+(isToday(d) ? 'Min dag' : esc(dayName(d)))+' · '+esc(nameOf(id))+'</h2><span class="sub">'+esc(sub)+'</span></div>'+
         '<button type="button" class="btn back" data-act="view" data-view="day">Familien</button></header>'+
       (tasks ? '<section class="me-card"><h3 class="label">Oppgaver · '+doneN+' av '+tasks+' gjort</h3><div class="chores">'+
-        chores.map(choreRowHTML).join('')+dayPreps.map(prepRowHTML).join('')+'</div></section>' : '')+
+        taskRowsHTML(chores, dayPreps)+'</div></section>' : '')+
       '<section class="me-card"><h3 class="label">Avtaler</h3>'+
         (evts.length ? '<ol class="events">'+evts.map(function(e){ return eventHTML(e, d, id); }).join('')+'</ol>' : '<p class="empty">Ingen avtaler '+(isToday(d) ? 'i dag' : 'denne dagen')+'</p>')+'</section>'+
       '<section class="me-card"><h3 class="label">Middag</h3>'+dinner+'</section>'+
@@ -1077,6 +1104,7 @@
     var chores = choresFor(d);
     var fam = evts.filter(function(e){ return e.who === 'all'; });
     var dayPreps = prepTasksFor(d);
+    var drives = driveTasksFor(d);
     var famPreps = dayPreps.filter(function(t){ return t.who === 'all'; });
     var famEl = $('family');
     famEl.hidden = !fam.length && !famPreps.length;
@@ -1097,7 +1125,7 @@
     lanes.style.setProperty('--n', String(members.length));
     lanes.innerHTML = members.map(function(m){
       return laneHTML(m, evts.filter(function(e){ return isFor(e, m.id); }), chores.filter(function(c){ return c.who === m.id; }), d,
-        dayPreps.filter(function(t){ return t.who === m.id; }));
+        dayPreps.concat(drives).filter(function(t){ return t.who === m.id; }));
     }).join('');
     // Kveldssjekk på nettbrettet: forberedelser som ikke er gjort, fra første påminnelsestid
     var ev = $('evening');

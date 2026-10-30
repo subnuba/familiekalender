@@ -39,7 +39,7 @@ export async function kjørFamilie(hh, nå){
   const api = lastKjerne();
   api.load({household:hh, members, chore_rules, prep_rules, settings, dinners, completions, swaps, event_owners, rides, avtaler});
   const nåMin = nå.getHours() * 60 + nå.getMinutes();
-  const forfalt = api.notificationsFor(api.today()).filter(n => !n.done && tilMin(n.time) <= nåMin && tilMin(n.time) > nåMin - VINDU);
+  const forfalt = api.notificationsFor(new Date(nå.getFullYear(), nå.getMonth(), nå.getDate())).filter(n => !n.done && tilMin(n.time) <= nåMin && tilMin(n.time) > nåMin - VINDU);
   if (!forfalt.length) return {sendt:0, grunn:'ingenting forfalt'};
 
   const {hmac} = await serverSecrets();
